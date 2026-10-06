@@ -7629,13 +7629,12 @@ create_stream_for_sink(struct drm_connector *connector,
 {
 	struct drm_device *dev = connector->dev;
 	struct amdgpu_dm_connector *aconnector = NULL;
-	struct drm_display_mode *preferred_mode = NULL;
+	const struct drm_display_mode *preferred_mode = NULL;
 	const struct drm_connector_state *con_state = &dm_state->base;
 	struct dc_stream_state *stream = NULL;
 	struct drm_display_mode mode;
 	struct drm_display_mode saved_mode;
 	struct drm_display_mode *freesync_mode = NULL;
-	bool native_mode_found = false;
 	bool recalculate_timing = false;
 	bool scale = dm_state->scaling != RMX_OFF;
 	int mode_refresh;
@@ -7686,27 +7685,15 @@ create_stream_for_sink(struct drm_connector *connector,
 	stream->timing.flags.LTE_340MCSC_SCRAMBLE =
 		connector->display_info.hdmi.scdc.scrambling.low_rates;
 
-	list_for_each_entry(preferred_mode, &connector->modes, head) {
-		/* Search for preferred mode */
-		if (preferred_mode->type & DRM_MODE_TYPE_PREFERRED) {
-			native_mode_found = true;
-			break;
-		}
-	}
-	if (!native_mode_found)
-		preferred_mode = list_first_entry_or_null(
-				&connector->modes,
-				struct drm_display_mode,
-				head);
+	if (aconnector && aconnector->native_mode.clock)
+		preferred_mode = &aconnector->native_mode;
 
 	mode_refresh = drm_mode_vrefresh(&mode);
 
 	if (preferred_mode == NULL) {
 		/*
-		 * This may not be an error, the use case is when we have no
-		 * usermode calls to reset and set mode upon hotplug. In this
-		 * case, we call set mode ourselves to restore the previous mode
-		 * and the modelist may not be filled in time.
+		 * Not an error for writeback connectors, or for a sink whose
+		 * modes have not been probed yet.
 		 */
 		drm_dbg_driver(dev, "No preferred mode found\n");
 	} else if (aconnector) {
@@ -8345,10 +8332,56 @@ static void amdgpu_dm_connector_funcs_force(struct drm_connector *connector)
 	}
 }
 
+/**
+ * amdgpu_dm_connector_fill_modes - probe modes and remember the native mode
+ * @connector: connector to probe
+ * @max_width: widest mode to keep in &drm_connector.modes
+ * @max_height: tallest mode to keep in &drm_connector.modes
+ *
+ * create_stream_for_sink() drives scaled modes with the native mode's timings,
+ * so the native mode must not depend on who probed last. A probe limited below
+ * the device's maximum size, such as fbdev's on hotplug, can prune it from
+ * &drm_connector.modes, so only a probe with the full limits replaces it.
+ *
+ * Returns: the number of modes found, as drm_helper_probe_single_connector_modes().
+ */
+int amdgpu_dm_connector_fill_modes(struct drm_connector *connector,
+				   u32 max_width, u32 max_height)
+{
+	struct amdgpu_dm_connector *aconnector = to_amdgpu_dm_connector(connector);
+	struct drm_mode_config *config = &connector->dev->mode_config;
+	struct drm_display_mode *mode, *native = NULL;
+	int count;
+
+	count = drm_helper_probe_single_connector_modes(connector, max_width, max_height);
+
+	if (max_width < config->max_width || max_height < config->max_height)
+		return count;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (mode->type & DRM_MODE_TYPE_PREFERRED) {
+			native = mode;
+			break;
+		}
+	}
+	if (!native)
+		native = list_first_entry_or_null(&connector->modes,
+						  struct drm_display_mode, head);
+
+	drm_modeset_lock(&config->connection_mutex, NULL);
+	if (native)
+		drm_mode_copy(&aconnector->native_mode, native);
+	else
+		memset(&aconnector->native_mode, 0, sizeof(aconnector->native_mode));
+	drm_modeset_unlock(&config->connection_mutex);
+
+	return count;
+}
+
 static const struct drm_connector_funcs amdgpu_dm_connector_funcs = {
 	.reset = amdgpu_dm_connector_funcs_reset,
 	.detect = amdgpu_dm_connector_detect,
-	.fill_modes = drm_helper_probe_single_connector_modes,
+	.fill_modes = amdgpu_dm_connector_fill_modes,
 	.destroy = amdgpu_dm_connector_destroy,
 	.atomic_duplicate_state = amdgpu_dm_connector_atomic_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,

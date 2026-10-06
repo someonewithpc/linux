@@ -861,6 +861,14 @@ struct amdgpu_dm_connector {
 	union dp_downstream_port_present mst_downstream_port_present;
 	/* Cached display modes */
 	struct drm_display_mode freesync_vid_base;
+	/*
+	 * The sink's preferred mode, with CRTC timings, as of the last probe
+	 * with the device's full size limits; see
+	 * amdgpu_dm_connector_fill_modes(). Scaled modes are driven with its
+	 * timings. A zero clock means there is none. Protected by
+	 * &drm_mode_config.connection_mutex.
+	 */
+	struct drm_display_mode native_mode;
 
 	int sr_skip_count;
 	bool disallow_edp_enter_psr;
@@ -1097,6 +1105,9 @@ void dm_restore_drm_connector_state(struct drm_device *dev,
 
 void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
 				    const struct drm_edid *drm_edid, bool do_mccs);
+
+int amdgpu_dm_connector_fill_modes(struct drm_connector *connector,
+				   u32 max_width, u32 max_height);
 
 void amdgpu_dm_trigger_timing_sync(struct drm_device *dev);
 
