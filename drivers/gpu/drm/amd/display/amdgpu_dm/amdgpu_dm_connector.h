@@ -160,6 +160,11 @@ enum dc_status dm_validate_stream_and_context(struct dc *dc,
 					      struct dc_stream_state *stream);
 struct drm_encoder *amdgpu_dm_connector_to_encoder(struct drm_connector *connector);
 void amdgpu_dm_get_native_mode(struct drm_connector *connector);
+void amdgpu_dm_connector_check_native_mode(struct drm_connector *connector,
+					   u32 max_width, u32 max_height);
+int amdgpu_dm_connector_fill_modes(struct drm_connector *connector,
+				   u32 max_width, u32 max_height);
+extern const struct drm_connector_funcs amdgpu_dm_connector_funcs;
 struct drm_display_mode *amdgpu_dm_create_common_mode(struct drm_encoder *encoder,
 						      const char *name,
 						      int hdisplay, int vdisplay);

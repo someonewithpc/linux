@@ -894,6 +894,14 @@ struct amdgpu_dm_connector {
 	union dp_downstream_port_present mst_downstream_port_present;
 	/* Cached display modes */
 	struct drm_display_mode freesync_vid_base;
+	/*
+	 * Whether the last probe with room for the encoder's native_mode kept
+	 * that exact timing. amdgpu_dm_get_native_mode() clears it when the
+	 * timing changes, and mode_valid when it rejects the timing. A probe
+	 * with size limits below the native size doesn't validate it, so
+	 * otherwise this keeps the result of the last probe that did.
+	 */
+	bool native_mode_validated;
 
 	int sr_skip_count;
 	bool disallow_edp_enter_psr;
