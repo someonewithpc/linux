@@ -55,6 +55,8 @@
 #include "amdgpu_dm_psr.h"
 #include "dm_helpers.h"
 
+#include <kunit/static_stub.h>
+
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_uapi.h>
 #include <drm/drm_atomic_helper.h>
@@ -2322,6 +2324,8 @@ STATIC_IFN_KUNIT enum dc_status dm_validate_stream_and_context(struct dc *dc,
 	enum dc_status dc_result = DC_ERROR_UNEXPECTED;
 	struct dc_plane_state *dc_plane_state = NULL;
 	struct dc_state *dc_state = NULL;
+
+	KUNIT_STATIC_STUB_REDIRECT(dm_validate_stream_and_context, dc, stream);
 
 	if (!stream)
 		goto cleanup;
