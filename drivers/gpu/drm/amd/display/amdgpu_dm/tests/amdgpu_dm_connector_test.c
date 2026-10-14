@@ -4547,6 +4547,115 @@ static void dm_test_create_stream_hdmi_vsif(struct kunit *test)
 	dc_sink_release(sink);
 }
 
+/*
+ * Build a stream after a probe with size limits below the native mode, such as
+ * fbdev emulation's. That probe leaves only a 1920x1200 scaled mode in the
+ * connector's mode list, while the encoder keeps the 3840x2400 native mode
+ */
+static struct dc_stream_state *
+dm_test_native_mode_pruned_stream(struct kunit *test, int connector_type)
+{
+	static const u8 edid[EDID_LENGTH];
+	struct dm_test_stream_ctx *ctx = dm_test_stream_ctx_alloc(test);
+	struct amdgpu_encoder *aenc;
+	struct dc_stream_state *stream;
+	struct drm_display_mode *native;
+
+	ctx->aconnector->base.connector_type = connector_type;
+
+	aenc = drmm_kzalloc(ctx->drm, sizeof(*aenc), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aenc);
+	KUNIT_ASSERT_EQ(test, drmm_encoder_init(ctx->drm, &aenc->base, NULL,
+						DRM_MODE_ENCODER_TMDS, NULL), 0);
+	KUNIT_ASSERT_EQ(test, drm_connector_attach_encoder(&ctx->aconnector->base, &aenc->base), 0);
+
+	native = &aenc->native_mode;
+	native->clock = 592500;
+	native->hdisplay = 3840;
+	native->hsync_start = 3888;
+	native->hsync_end = 3920;
+	native->htotal = 4000;
+	native->vdisplay = 2400;
+	native->vsync_start = 2403;
+	native->vsync_end = 2409;
+	native->vtotal = 2469;
+	/* Cached by the first, unlimited probe */
+	drm_mode_copy(&ctx->aconnector->freesync_vid_base, native);
+
+	drm_mode_copy(ctx->mode, native);
+	ctx->mode->hdisplay = 1920;
+	ctx->mode->vdisplay = 1200;
+	drm_mode_set_crtcinfo(ctx->mode, CRTC_INTERLACE_HALVE_V);
+	dm_test_stream_add_mode(test, ctx, 0);
+	ctx->dm_state->scaling = RMX_FULL;
+
+	ctx->aconnector->drm_edid = drm_edid_alloc(edid, sizeof(edid));
+	KUNIT_ASSERT_NOT_NULL(test, ctx->aconnector->drm_edid);
+
+	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
+					ctx->dm_state, NULL, 8,
+					PIXEL_ENCODING_RGB, false);
+
+	drm_edid_free(ctx->aconnector->drm_edid);
+	KUNIT_ASSERT_NOT_NULL(test, stream);
+
+	return stream;
+}
+
+/**
+ * dm_test_create_stream_native_mode_pruned_edp - Test eDP gets native timing
+ * @test: The KUnit test context
+ *
+ * The scaled mode must still be driven with the panel's native timing, kept in
+ * the encoder
+ */
+static void dm_test_create_stream_native_mode_pruned_edp(struct kunit *test)
+{
+	struct dc_stream_state *stream =
+		dm_test_native_mode_pruned_stream(test, DRM_MODE_CONNECTOR_eDP);
+
+	KUNIT_EXPECT_EQ(test, (int)stream->timing.h_addressable, 3840);
+	KUNIT_EXPECT_EQ(test, (int)stream->timing.v_addressable, 2400);
+	KUNIT_EXPECT_EQ(test, (int)stream->src.width, 1920);
+	KUNIT_EXPECT_EQ(test, (int)stream->src.height, 1200);
+	dc_stream_release(stream);
+}
+
+/**
+ * dm_test_create_stream_native_mode_pruned_lvds - Test LVDS gets native timing
+ * @test: The KUnit test context
+ */
+static void dm_test_create_stream_native_mode_pruned_lvds(struct kunit *test)
+{
+	struct dc_stream_state *stream =
+		dm_test_native_mode_pruned_stream(test, DRM_MODE_CONNECTOR_LVDS);
+
+	KUNIT_EXPECT_EQ(test, (int)stream->timing.h_addressable, 3840);
+	KUNIT_EXPECT_EQ(test, (int)stream->timing.v_addressable, 2400);
+	KUNIT_EXPECT_EQ(test, (int)stream->src.width, 1920);
+	KUNIT_EXPECT_EQ(test, (int)stream->src.height, 1200);
+	dc_stream_release(stream);
+}
+
+/**
+ * dm_test_create_stream_native_mode_pruned_hdmi - Test HDMI uses the first mode
+ * @test: The KUnit test context
+ *
+ * On a connector that is not a panel, mode_valid may have dropped the native
+ * mode, so the first mode left in the list must drive the timing
+ */
+static void dm_test_create_stream_native_mode_pruned_hdmi(struct kunit *test)
+{
+	struct dc_stream_state *stream =
+		dm_test_native_mode_pruned_stream(test, DRM_MODE_CONNECTOR_HDMIA);
+
+	KUNIT_EXPECT_EQ(test, (int)stream->timing.h_addressable, 1920);
+	KUNIT_EXPECT_EQ(test, (int)stream->timing.v_addressable, 1200);
+	KUNIT_EXPECT_EQ(test, (int)stream->src.width, 1920);
+	KUNIT_EXPECT_EQ(test, (int)stream->src.height, 1200);
+	dc_stream_release(stream);
+}
+
 /* Tests for amdgpu_dm_connector_detect() */
 
 /*
@@ -10246,6 +10355,9 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_stream_dp_vsc_colorimetry),
 	KUNIT_CASE(dm_test_create_stream_dp_colorimetry_quirk),
 	KUNIT_CASE(dm_test_create_stream_hdmi_vsif),
+	KUNIT_CASE(dm_test_create_stream_native_mode_pruned_edp),
+	KUNIT_CASE(dm_test_create_stream_native_mode_pruned_lvds),
+	KUNIT_CASE(dm_test_create_stream_native_mode_pruned_hdmi),
 	/* amdgpu_dm_connector_detect */
 	KUNIT_CASE(dm_test_detect_force_on),
 	KUNIT_CASE(dm_test_detect_force_on_digital),
