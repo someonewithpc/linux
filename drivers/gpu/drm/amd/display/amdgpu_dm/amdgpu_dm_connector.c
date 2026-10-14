@@ -257,6 +257,8 @@ STATIC_IFN_KUNIT void update_subconnector_property(struct amdgpu_dm_connector *a
 EXPORT_IF_KUNIT(update_subconnector_property);
 
 STATIC_IFN_KUNIT int amdgpu_dm_connector_get_modes(struct drm_connector *connector);
+STATIC_IFN_KUNIT struct drm_encoder *amdgpu_dm_connector_to_encoder(
+	struct drm_connector *connector);
 
 STATIC_IFN_KUNIT void amdgpu_dm_fbc_init(struct drm_connector *connector)
 {
@@ -1470,6 +1472,7 @@ create_stream_for_sink(struct drm_connector *connector,
 	struct dc_stream_state *stream = NULL;
 	struct drm_display_mode mode;
 	struct drm_display_mode saved_mode;
+	struct drm_display_mode native_mode;
 	struct drm_display_mode *freesync_mode = NULL;
 	bool native_mode_found = false;
 	bool recalculate_timing = false;
@@ -1529,6 +1532,31 @@ create_stream_for_sink(struct drm_connector *connector,
 			break;
 		}
 	}
+
+	/*
+	 * After a probe with size limits smaller than the preferred mode,
+	 * connector->modes no longer has that mode, and the first mode left
+	 * would become the stream timing. fbdev emulation probes with limits
+	 * that video= can set below the native size. The encoder has a copy of
+	 * the preferred mode from amdgpu_dm_get_native_mode(), made on every
+	 * probe before the limits apply, so use that copy. Only do this for eDP
+	 * and LVDS panels, which take only their native timing. On other
+	 * connectors mode_valid can also reject the preferred mode, and then
+	 * the first valid mode is the right one
+	 */
+	if (!native_mode_found && aconnector && !aconnector->mst_root && aconnector->drm_edid &&
+	    (connector->connector_type == DRM_MODE_CONNECTOR_eDP ||
+	     connector->connector_type == DRM_MODE_CONNECTOR_LVDS)) {
+		struct drm_encoder *encoder = amdgpu_dm_connector_to_encoder(connector);
+
+		if (encoder && to_amdgpu_encoder(encoder)->native_mode.clock) {
+			drm_mode_init(&native_mode, &to_amdgpu_encoder(encoder)->native_mode);
+			drm_mode_set_crtcinfo(&native_mode, CRTC_INTERLACE_HALVE_V);
+			preferred_mode = &native_mode;
+			native_mode_found = true;
+		}
+	}
+
 	if (!native_mode_found)
 		preferred_mode = list_first_entry_or_null(
 				&connector->modes,
