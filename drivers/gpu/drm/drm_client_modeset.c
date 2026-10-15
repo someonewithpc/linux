@@ -121,11 +121,13 @@ drm_client_find_modeset(struct drm_client_dev *client, struct drm_crtc *crtc)
 }
 
 static const struct drm_display_mode *
-drm_connector_get_tiled_mode(struct drm_connector *connector)
+drm_connector_get_tiled_mode(struct drm_connector *connector, int width, int height)
 {
 	const struct drm_display_mode *mode;
 
 	list_for_each_entry(mode, &connector->modes, head) {
+		if (drm_mode_validate_size(mode, width, height) != MODE_OK)
+			continue;
 		if (mode->hdisplay == connector->tile_h_size &&
 		    mode->vdisplay == connector->tile_v_size)
 			return mode;
@@ -134,11 +136,13 @@ drm_connector_get_tiled_mode(struct drm_connector *connector)
 }
 
 static const struct drm_display_mode *
-drm_connector_fallback_non_tiled_mode(struct drm_connector *connector)
+drm_connector_fallback_non_tiled_mode(struct drm_connector *connector, int width, int height)
 {
 	const struct drm_display_mode *mode;
 
 	list_for_each_entry(mode, &connector->modes, head) {
+		if (drm_mode_validate_size(mode, width, height) != MODE_OK)
+			continue;
 		if (mode->hdisplay == connector->tile_h_size &&
 		    mode->vdisplay == connector->tile_v_size)
 			continue;
@@ -163,14 +167,19 @@ drm_connector_preferred_mode(struct drm_connector *connector, int width, int hei
 }
 
 static const struct drm_display_mode *
-drm_connector_first_mode(struct drm_connector *connector)
+drm_connector_first_mode(struct drm_connector *connector, int width, int height)
 {
-	return list_first_entry_or_null(&connector->modes,
-					struct drm_display_mode, head);
+	const struct drm_display_mode *mode;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (drm_mode_validate_size(mode, width, height) == MODE_OK)
+			return mode;
+	}
+	return NULL;
 }
 
 static const struct drm_display_mode *
-drm_connector_pick_cmdline_mode(struct drm_connector *connector)
+drm_connector_pick_cmdline_mode(struct drm_connector *connector, int width, int height)
 {
 	const struct drm_cmdline_mode *cmdline_mode;
 	const struct drm_display_mode *mode;
@@ -183,6 +192,8 @@ drm_connector_pick_cmdline_mode(struct drm_connector *connector)
 	 */
 
 	list_for_each_entry(mode, &connector->modes, head) {
+		if (drm_mode_validate_size(mode, width, height) != MODE_OK)
+			continue;
 		if (mode->type & DRM_MODE_TYPE_USERDEF)
 			return mode;
 	}
@@ -199,6 +210,8 @@ drm_connector_pick_cmdline_mode(struct drm_connector *connector)
 	prefer_non_interlace = !cmdline_mode->interlace;
 again:
 	list_for_each_entry(mode, &connector->modes, head) {
+		if (drm_mode_validate_size(mode, width, height) != MODE_OK)
+			continue;
 		/* check width/height */
 		if (mode->hdisplay != cmdline_mode->xres ||
 		    mode->vdisplay != cmdline_mode->yres)
@@ -321,7 +334,7 @@ static bool drm_client_target_cloned(struct drm_device *dev,
 			continue;
 
 		mode_replace(dev, &modes[i],
-			     drm_connector_pick_cmdline_mode(connectors[i]));
+			     drm_connector_pick_cmdline_mode(connectors[i], width, height));
 		if (!modes[i]) {
 			can_clone = false;
 			break;
@@ -357,6 +370,8 @@ static bool drm_client_target_cloned(struct drm_device *dev,
 			continue;
 
 		list_for_each_entry(mode, &connectors[i]->modes, head) {
+			if (drm_mode_validate_size(mode, width, height) != MODE_OK)
+				continue;
 			if (drm_mode_match(mode, dmt_mode,
 					   DRM_MODE_MATCH_TIMINGS |
 					   DRM_MODE_MATCH_CLOCK |
@@ -472,7 +487,7 @@ retry:
 
 		mode_type = "cmdline";
 		mode_replace(dev, &modes[i],
-			     drm_connector_pick_cmdline_mode(connector));
+			     drm_connector_pick_cmdline_mode(connector, width, height));
 
 		if (!modes[i]) {
 			mode_type = "preferred";
@@ -483,7 +498,7 @@ retry:
 		if (!modes[i]) {
 			mode_type = "first";
 			mode_replace(dev, &modes[i],
-				     drm_connector_first_mode(connector));
+				     drm_connector_first_mode(connector, width, height));
 		}
 
 		/*
@@ -499,14 +514,16 @@ retry:
 			    connector->num_h_tile * connector->num_v_tile ||
 			    (connector->tile_h_loc == 0 &&
 			     connector->tile_v_loc == 0 &&
-			     !drm_connector_get_tiled_mode(connector))) {
+			     !drm_connector_get_tiled_mode(connector, width, height))) {
 				mode_type = "non tiled";
 				mode_replace(dev, &modes[i],
-					     drm_connector_fallback_non_tiled_mode(connector));
+					     drm_connector_fallback_non_tiled_mode(connector,
+										   width, height));
 			} else {
 				mode_type = "tiled";
 				mode_replace(dev, &modes[i],
-					     drm_connector_get_tiled_mode(connector));
+					     drm_connector_get_tiled_mode(connector,
+									  width, height));
 			}
 		}
 
@@ -721,7 +738,7 @@ retry:
 
 		mode_type = "cmdline";
 		mode_replace(dev, &modes[i],
-			     drm_connector_pick_cmdline_mode(connector));
+			     drm_connector_pick_cmdline_mode(connector, width, height));
 
 		if (!modes[i]) {
 			mode_type = "preferred";
@@ -732,7 +749,7 @@ retry:
 		if (!modes[i]) {
 			mode_type = "first";
 			mode_replace(dev, &modes[i],
-				     drm_connector_first_mode(connector));
+				     drm_connector_first_mode(connector, width, height));
 		}
 
 		/* last resort: use current mode */
@@ -750,7 +767,8 @@ retry:
 		    num_tiled_conns < connector->num_h_tile * connector->num_v_tile) {
 			mode_type = "non tiled";
 			mode_replace(dev, &modes[i],
-				     drm_connector_fallback_non_tiled_mode(connector));
+				     drm_connector_fallback_non_tiled_mode(connector,
+									   width, height));
 		}
 		crtcs[i] = crtc;
 
@@ -870,8 +888,15 @@ int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, 
 	mutex_lock(&client->modeset_mutex);
 
 	mutex_lock(&dev->mode_config.mutex);
+	/*
+	 * Probe with the device limits, not width x height. connector->modes is
+	 * shared with userspace and the driver, so it must keep modes larger
+	 * than this client's size. The mode pickers skip those instead
+	 */
 	for (i = 0; i < connector_count; i++)
-		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i], width, height);
+		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i],
+								      dev->mode_config.max_width,
+								      dev->mode_config.max_height);
 	if (!total_modes_count)
 		drm_dbg_kms(dev, "No connectors reported connected with modes\n");
 	drm_client_connectors_enabled(connectors, connector_count, enabled);
