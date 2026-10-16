@@ -18,6 +18,9 @@ struct drm_client_modeset_test_priv {
 	struct drm_device *drm;
 	struct device *dev;
 	struct drm_connector connector;
+	struct drm_connector second_connector;
+	struct drm_encoder encoder;
+	const struct drm_display_mode *modes[2];
 };
 
 static int drm_client_modeset_connector_get_modes(struct drm_connector *connector)
@@ -48,9 +51,24 @@ static const struct drm_connector_helper_funcs drm_client_modeset_connector_help
 	.get_modes = drm_client_modeset_connector_get_modes,
 };
 
+static int drm_client_modeset_connector_get_modes_preferred(struct drm_connector *connector)
+{
+	int count = drm_add_modes_noedid(connector, 1920, 1080);
+
+	drm_set_preferred_mode(connector, 1920, 1080);
+
+	return count;
+}
+
+static const struct drm_connector_helper_funcs drm_client_modeset_preferred_helper_funcs = {
+	.get_modes = drm_client_modeset_connector_get_modes_preferred,
+};
+
 static const struct drm_connector_funcs drm_client_modeset_connector_funcs = {
 	.atomic_destroy_state   = drm_atomic_helper_connector_destroy_state,
-	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.fill_modes             = drm_helper_probe_single_connector_modes,
+	.reset                  = drm_atomic_helper_connector_reset,
 };
 
 static int drm_client_modeset_test_init(struct kunit *test)
@@ -196,6 +214,298 @@ static struct kunit_suite drm_test_pick_cmdline_test_suite = {
 };
 
 kunit_test_suite(drm_test_pick_cmdline_test_suite);
+
+static void drm_test_pick_first_mode_within_limits(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connector = &priv->connector;
+	const struct drm_display_mode *full, *smaller, *none, *preferred;
+	int ret;
+
+	drm_connector_helper_add(connector, &drm_client_modeset_preferred_helper_funcs);
+
+	mutex_lock(&drm->mode_config.mutex);
+	ret = drm_helper_probe_single_connector_modes(connector, 1920, 1080);
+	full = drm_connector_first_mode(connector, 1920, 1080);
+	smaller = drm_connector_first_mode(connector, 1024, 768);
+	none = drm_connector_first_mode(connector, 320, 240);
+	preferred = drm_connector_preferred_mode(connector, 1024, 768);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_ASSERT_GT(test, ret, 0);
+
+	KUNIT_ASSERT_NOT_NULL(test, full);
+	KUNIT_EXPECT_EQ(test, full->hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, full->vdisplay, 1080);
+
+	KUNIT_ASSERT_NULL(test, preferred);
+
+	KUNIT_ASSERT_NOT_NULL(test, smaller);
+	KUNIT_EXPECT_EQ(test, smaller->hdisplay, 1024);
+	KUNIT_EXPECT_EQ(test, smaller->vdisplay, 768);
+
+	KUNIT_EXPECT_NULL(test, none);
+}
+
+static void drm_test_pick_cmdline_mode_within_limits(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connector = &priv->connector;
+	struct drm_cmdline_mode *cmdline_mode = &connector->cmdline_mode;
+	const struct drm_display_mode *full, *smaller;
+	int ret;
+
+	KUNIT_ASSERT_TRUE(test, drm_mode_parse_command_line_for_connector("1920x1080", connector,
+									  cmdline_mode));
+
+	mutex_lock(&drm->mode_config.mutex);
+	ret = drm_helper_probe_single_connector_modes(connector, 1920, 1080);
+	full = drm_connector_pick_cmdline_mode(connector, 1920, 1080);
+	smaller = drm_connector_pick_cmdline_mode(connector, 1024, 768);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_ASSERT_GT(test, ret, 0);
+
+	KUNIT_ASSERT_NOT_NULL(test, full);
+	KUNIT_EXPECT_EQ(test, full->hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, full->vdisplay, 1080);
+
+	KUNIT_EXPECT_NULL(test, smaller);
+}
+
+static void drm_test_pick_tiled_mode_within_limits(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connector = &priv->connector;
+	const struct drm_display_mode *tiled, *smaller_tiled, *non_tiled;
+	int ret;
+
+	drm_connector_helper_add(connector, &drm_client_modeset_preferred_helper_funcs);
+	connector->tile_h_size = 1920;
+	connector->tile_v_size = 1080;
+
+	mutex_lock(&drm->mode_config.mutex);
+	ret = drm_helper_probe_single_connector_modes(connector, 1920, 1080);
+	tiled = drm_connector_get_tiled_mode(connector, 1920, 1080);
+	smaller_tiled = drm_connector_get_tiled_mode(connector, 1024, 768);
+	non_tiled = drm_connector_fallback_non_tiled_mode(connector, 1024, 768);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_ASSERT_GT(test, ret, 0);
+
+	KUNIT_ASSERT_NOT_NULL(test, tiled);
+	KUNIT_EXPECT_EQ(test, tiled->hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, tiled->vdisplay, 1080);
+
+	KUNIT_EXPECT_NULL(test, smaller_tiled);
+
+	KUNIT_ASSERT_NOT_NULL(test, non_tiled);
+	KUNIT_EXPECT_EQ(test, non_tiled->hdisplay, 1024);
+	KUNIT_EXPECT_EQ(test, non_tiled->vdisplay, 768);
+}
+
+static void drm_client_modeset_test_destroy_modes(void *ptr)
+{
+	struct drm_client_modeset_test_priv *priv = ptr;
+
+	modes_destroy(priv->drm, priv->modes, ARRAY_SIZE(priv->modes));
+}
+
+static void drm_test_pick_clone_mode_within_limits(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connectors[] = { &priv->connector, &priv->second_connector };
+	const struct drm_display_mode **modes = priv->modes;
+	struct drm_client_offset offsets[ARRAY_SIZE(connectors)] = {};
+	bool enabled[ARRAY_SIZE(connectors)] = { true, true };
+	bool cloned_fits, cloned_too_small;
+	unsigned int i;
+	int ret;
+
+	ret = drmm_connector_init(drm, &priv->second_connector,
+				  &drm_client_modeset_connector_funcs,
+				  DRM_MODE_CONNECTOR_Unknown,
+				  NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	drm_connector_helper_add(&priv->second_connector,
+				 &drm_client_modeset_connector_helper_funcs);
+
+	ret = kunit_add_action_or_reset(test, drm_client_modeset_test_destroy_modes, priv);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	mutex_lock(&drm->mode_config.mutex);
+	for (i = 0; i < ARRAY_SIZE(connectors); i++) {
+		ret = drm_helper_probe_single_connector_modes(connectors[i], 1920, 1080);
+		KUNIT_EXPECT_GT(test, ret, 0);
+	}
+
+	cloned_too_small = drm_client_target_cloned(drm, connectors, ARRAY_SIZE(connectors),
+						    modes, offsets, enabled, 800, 600);
+	modes_destroy(drm, modes, ARRAY_SIZE(connectors));
+
+	cloned_fits = drm_client_target_cloned(drm, connectors, ARRAY_SIZE(connectors),
+					       modes, offsets, enabled, 1024, 768);
+	mutex_unlock(&drm->mode_config.mutex);
+
+	KUNIT_EXPECT_FALSE(test, cloned_too_small);
+	KUNIT_EXPECT_TRUE(test, cloned_fits);
+	for (i = 0; i < ARRAY_SIZE(connectors); i++) {
+		KUNIT_ASSERT_NOT_NULL(test, modes[i]);
+		KUNIT_EXPECT_EQ(test, modes[i]->hdisplay, 1024);
+		KUNIT_EXPECT_EQ(test, modes[i]->vdisplay, 768);
+	}
+}
+
+static struct drm_crtc *drm_client_modeset_test_add_crtc(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_encoder *encoder = &priv->encoder;
+	struct drm_plane *plane;
+	struct drm_crtc *crtc;
+	int ret;
+
+	plane = drm_kunit_helper_create_primary_plane(test, drm, NULL, NULL, NULL, 0, NULL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, plane);
+
+	crtc = drm_kunit_helper_create_crtc(test, drm, plane, NULL, NULL, NULL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, crtc);
+
+	ret = drmm_encoder_init(drm, encoder, NULL, DRM_MODE_ENCODER_NONE, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	encoder->possible_crtcs = drm_crtc_mask(crtc);
+
+	ret = drm_connector_attach_encoder(&priv->connector, encoder);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	return crtc;
+}
+
+static void drm_test_firmware_config_tiled_fallback(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connector = &priv->connector;
+	struct drm_connector *connectors[] = { connector };
+	struct drm_crtc *crtcs[ARRAY_SIZE(connectors)] = {};
+	struct drm_client_offset offsets[ARRAY_SIZE(connectors)] = {};
+	bool enabled[ARRAY_SIZE(connectors)] = { true };
+	struct drm_client_dev client = { .dev = drm };
+	const struct drm_display_mode *too_small_mode;
+	bool config_fits, config_too_small;
+	struct drm_crtc *too_small_crtc;
+	struct drm_crtc *crtc;
+	int ret;
+
+	crtc = drm_client_modeset_test_add_crtc(test);
+
+	drm_mode_config_reset(drm);
+	connector->state->best_encoder = &priv->encoder;
+	connector->state->crtc = crtc;
+	drm_connector_get(connector);
+
+	drm_connector_helper_add(connector, &drm_client_modeset_preferred_helper_funcs);
+	connector->has_tile = true;
+	connector->num_h_tile = 2;
+	connector->num_v_tile = 1;
+	connector->tile_h_size = 1920;
+	connector->tile_v_size = 1080;
+
+	ret = kunit_add_action_or_reset(test, drm_client_modeset_test_destroy_modes, priv);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	mutex_lock(&drm->mode_config.mutex);
+	ret = drm_helper_probe_single_connector_modes(connector, 4096, 4096);
+
+	config_too_small = drm_client_firmware_config(&client, connectors, ARRAY_SIZE(connectors),
+						      crtcs, priv->modes, offsets, enabled,
+						      320, 240);
+	too_small_mode = priv->modes[0];
+	too_small_crtc = crtcs[0];
+	modes_destroy(drm, priv->modes, ARRAY_SIZE(connectors));
+	memset(crtcs, 0, sizeof(crtcs));
+
+	config_fits = drm_client_firmware_config(&client, connectors, ARRAY_SIZE(connectors),
+						 crtcs, priv->modes, offsets, enabled,
+						 1024, 768);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_ASSERT_GT(test, ret, 0);
+
+	KUNIT_EXPECT_TRUE(test, config_too_small);
+	KUNIT_EXPECT_NULL(test, too_small_mode);
+	KUNIT_EXPECT_PTR_EQ(test, too_small_crtc, crtc);
+
+	KUNIT_EXPECT_TRUE(test, config_fits);
+	KUNIT_EXPECT_PTR_EQ(test, crtcs[0], crtc);
+	KUNIT_ASSERT_NOT_NULL(test, priv->modes[0]);
+	KUNIT_EXPECT_EQ(test, priv->modes[0]->hdisplay, 1024);
+	KUNIT_EXPECT_EQ(test, priv->modes[0]->vdisplay, 768);
+}
+
+KUNIT_DEFINE_ACTION_WRAPPER(drm_client_modeset_free_wrapper, drm_client_modeset_free,
+			    struct drm_client_dev *);
+
+static void drm_test_probe_keeps_modes_above_limits(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connector = &priv->connector;
+	const struct drm_display_mode *mode;
+	struct drm_client_dev *client;
+	int ret;
+
+	drm->mode_config.max_width = 4096;
+	drm->mode_config.max_height = 4096;
+
+	drm_client_modeset_test_add_crtc(test);
+
+	drm_connector_helper_add(connector, &drm_client_modeset_preferred_helper_funcs);
+
+	client = kunit_kzalloc(test, sizeof(*client), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, client);
+	client->dev = drm;
+
+	ret = drm_client_modeset_create(client);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = kunit_add_action_or_reset(test, drm_client_modeset_free_wrapper, client);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = drm_client_modeset_probe(client, 1024, 768);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	mode = client->modesets[0].mode;
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+	KUNIT_EXPECT_EQ(test, mode->hdisplay, 1024);
+	KUNIT_EXPECT_EQ(test, mode->vdisplay, 768);
+
+	mutex_lock(&drm->mode_config.mutex);
+	mode = drm_connector_preferred_mode(connector, 1920, 1080);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+	KUNIT_EXPECT_EQ(test, mode->hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, mode->vdisplay, 1080);
+}
+
+static struct kunit_case drm_test_pick_mode_limits_tests[] = {
+	KUNIT_CASE(drm_test_pick_first_mode_within_limits),
+	KUNIT_CASE(drm_test_pick_cmdline_mode_within_limits),
+	KUNIT_CASE(drm_test_pick_tiled_mode_within_limits),
+	KUNIT_CASE(drm_test_pick_clone_mode_within_limits),
+	KUNIT_CASE(drm_test_firmware_config_tiled_fallback),
+	KUNIT_CASE(drm_test_probe_keeps_modes_above_limits),
+	{}
+};
+
+static struct kunit_suite drm_test_pick_mode_limits_test_suite = {
+	.name = "drm_test_pick_mode_limits",
+	.init = drm_client_modeset_test_init,
+	.test_cases = drm_test_pick_mode_limits_tests
+};
+
+kunit_test_suite(drm_test_pick_mode_limits_test_suite);
 
 /*
  * This file is included directly by drm_client_modeset.c so we can't
