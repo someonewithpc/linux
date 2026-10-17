@@ -5425,7 +5425,8 @@ static void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *cap
 						    (brightness - lower_signal),
 						    upper_signal - lower_signal);
 scale:
-	*user_brightness = scale_fw_to_input(min, max,
+	/* convert_brightness_from_user() applies the min..max offset itself */
+	*user_brightness = scale_fw_to_input(0, max,
 					     DIV_ROUND_CLOSEST(lum * brightness, 101));
 }
 
