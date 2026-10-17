@@ -1419,6 +1419,160 @@ static void dm_test_brightness_from_user_with_curve(struct kunit *test)
 	amdgpu_dm_set_dc_debug_mask(saved_mask);
 }
 
+/*
+ * ATIF QBTC reply of an ASUS ROG Flow X13 GV301QH (BIOS 418), with
+ * min_input_signal 12 and max_input_signal 255
+ */
+static const struct amdgpu_dm_luminance_data gv301qh_curve[] = {
+	{ .input_signal =  14, .luminance =  2 },
+	{ .input_signal =  16, .luminance =  4 },
+	{ .input_signal =  18, .luminance =  6 },
+	{ .input_signal =  21, .luminance =  8 },
+	{ .input_signal =  23, .luminance = 10 },
+	{ .input_signal =  26, .luminance = 12 },
+	{ .input_signal =  29, .luminance = 14 },
+	{ .input_signal =  32, .luminance = 16 },
+	{ .input_signal =  35, .luminance = 18 },
+	{ .input_signal =  38, .luminance = 20 },
+	{ .input_signal =  41, .luminance = 22 },
+	{ .input_signal =  44, .luminance = 24 },
+	{ .input_signal =  48, .luminance = 26 },
+	{ .input_signal =  52, .luminance = 28 },
+	{ .input_signal =  55, .luminance = 30 },
+	{ .input_signal =  59, .luminance = 32 },
+	{ .input_signal =  62, .luminance = 34 },
+	{ .input_signal =  67, .luminance = 36 },
+	{ .input_signal =  71, .luminance = 38 },
+	{ .input_signal =  75, .luminance = 40 },
+	{ .input_signal =  80, .luminance = 42 },
+	{ .input_signal =  84, .luminance = 44 },
+	{ .input_signal =  88, .luminance = 46 },
+	{ .input_signal =  93, .luminance = 48 },
+	{ .input_signal =  98, .luminance = 50 },
+	{ .input_signal = 103, .luminance = 52 },
+	{ .input_signal = 108, .luminance = 54 },
+	{ .input_signal = 113, .luminance = 56 },
+	{ .input_signal = 118, .luminance = 58 },
+	{ .input_signal = 123, .luminance = 60 },
+	{ .input_signal = 129, .luminance = 62 },
+	{ .input_signal = 135, .luminance = 64 },
+	{ .input_signal = 140, .luminance = 66 },
+	{ .input_signal = 146, .luminance = 68 },
+	{ .input_signal = 152, .luminance = 70 },
+	{ .input_signal = 158, .luminance = 72 },
+	{ .input_signal = 164, .luminance = 74 },
+	{ .input_signal = 171, .luminance = 76 },
+	{ .input_signal = 177, .luminance = 78 },
+	{ .input_signal = 183, .luminance = 80 },
+	{ .input_signal = 190, .luminance = 82 },
+	{ .input_signal = 197, .luminance = 84 },
+	{ .input_signal = 204, .luminance = 86 },
+	{ .input_signal = 211, .luminance = 88 },
+	{ .input_signal = 218, .luminance = 90 },
+	{ .input_signal = 225, .luminance = 92 },
+	{ .input_signal = 232, .luminance = 94 },
+	{ .input_signal = 240, .luminance = 96 },
+	{ .input_signal = 247, .luminance = 98 },
+};
+
+static void dm_test_restore_dc_debug_mask(void *data)
+{
+	amdgpu_dm_set_dc_debug_mask((uintptr_t)data);
+}
+
+/* Turn the custom curve on, and back off when the test ends, even if it aborts */
+static void dm_test_enable_custom_curve(struct kunit *test)
+{
+	uint mask = amdgpu_dm_get_dc_debug_mask();
+
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, dm_test_restore_dc_debug_mask,
+							(void *)(uintptr_t)mask), 0);
+	amdgpu_dm_set_dc_debug_mask(mask & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
+}
+
+static void set_gv301qh_caps(struct amdgpu_dm_backlight_caps *caps)
+{
+	caps->aux_support = false;
+	caps->min_input_signal = 12;
+	caps->max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
+	caps->data_points = ARRAY_SIZE(gv301qh_curve);
+	memcpy(caps->luminance_data, gv301qh_curve, sizeof(gv301qh_curve));
+}
+
+/**
+ * dm_test_brightness_from_user_curve_floor - Test Custom curve floor is the minimum
+ * @test: The KUnit test context
+ *
+ * A request for 0 must reach the panel as the firmware minimum, not as the
+ * minimum applied twice
+ */
+static void dm_test_brightness_from_user_curve_floor(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int min, max;
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_caps(&caps);
+	get_brightness_range(&caps, &min, &max);
+
+	KUNIT_EXPECT_EQ(test, min, 3084U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)min);
+}
+
+/**
+ * dm_test_brightness_from_user_curve_values - Test Custom curve output with a minimum
+ * @test: The KUnit test context
+ *
+ * Worked out by hand, as (signal, luminance) points of gv301qh_curve and
+ * rounding to the closest integer at each step:
+ *
+ * 8000 is signal 31, between (29, 14) and (32, 16), so the luminance is 15
+ * and 15 * 31 / 101 = 5 on the firmware scale. That is 1285 on 0..65535
+ * and 3084 + 62451 * 1285 / 65535 = 4309 on min..max
+ *
+ * 32000 is signal 125, between (123, 60) and (129, 62), so the luminance
+ * is 61 and 61 * 125 / 101 = 75 on the firmware scale. That is 19275 on
+ * 0..65535 and 3084 + 62451 * 19275 / 65535 = 21452 on min..max
+ *
+ * 65535 is signal 255, past the last point (247, 98), so the luminance is
+ * 98 and 98 * 255 / 101 = 247 on the firmware scale. That is 63479 on
+ * 0..65535 and 3084 + 62451 * 63479 / 65535 = 63576 on min..max
+ */
+static void dm_test_brightness_from_user_curve_values(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_caps(&caps);
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 8000), 4309U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 32000), 21452U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 65535), 63576U);
+}
+
+/**
+ * dm_test_brightness_from_user_curve_monotonic - Test Custom curve stays in min..max
+ * @test: The KUnit test context
+ */
+static void dm_test_brightness_from_user_curve_monotonic(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int min, max, user;
+	u32 prev = 0, cur;
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_caps(&caps);
+	get_brightness_range(&caps, &min, &max);
+
+	for (user = 0; user <= max; user += 257) {
+		cur = convert_brightness_from_user(&caps, user);
+		KUNIT_EXPECT_GE(test, cur, (u32)min);
+		KUNIT_EXPECT_LE(test, cur, (u32)max);
+		KUNIT_EXPECT_GE(test, cur, prev);
+		prev = cur;
+	}
+}
+
 /**
  * dm_test_brightness_range_zero_signals - Test Brightness range with zero min and max signals
  * @test: The KUnit test context
@@ -1976,6 +2130,9 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_brightness_to_user_above_max),
 	KUNIT_CASE(dm_test_brightness_from_user_midrange),
 	KUNIT_CASE(dm_test_brightness_from_user_with_curve),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_floor),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_values),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_monotonic),
 	KUNIT_CASE(dm_test_brightness_range_zero_signals),
 	/* amdgpu_dm_backlight_fill_props */
 	KUNIT_CASE(dm_test_backlight_fill_props_ac_linear),
