@@ -1054,7 +1054,7 @@ static void dm_test_custom_brightness_no_data_points(struct kunit *test)
 
 	caps.data_points = 0;
 
-	convert_custom_brightness(&caps, 3084, 65535, &brightness);
+	convert_custom_brightness(&caps, 65535, &brightness);
 
 	/* No data points → no-op */
 	KUNIT_EXPECT_EQ(test, brightness, saved);
@@ -1078,7 +1078,7 @@ static void dm_test_custom_brightness_debug_mask_disables(struct kunit *test)
 	/* Set the disable flag */
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() | DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
 
-	convert_custom_brightness(&caps, 3084, 65535, &brightness);
+	convert_custom_brightness(&caps, 65535, &brightness);
 
 	/* Should be no-op due to debug mask */
 	KUNIT_EXPECT_EQ(test, brightness, saved);
@@ -1114,18 +1114,18 @@ static void dm_test_custom_brightness_exact_match(struct kunit *test)
 
 	/*
 	 * Set brightness so that scale_input_to_fw yields exactly 128.
-	 * scale_input_to_fw(min, max, x) = DIV_ROUND_CLOSEST(x * 255, max - min)
+	 * scale_input_to_fw(max, x) = DIV_ROUND_CLOSEST(x * 255, max)
 	 * With min=0, max=0x101*255=65535:
 	 * We need x such that DIV_ROUND_CLOSEST(x * 255, 65535) = 128
 	 * → x = 128 * 65535 / 255 = 32896
 	 */
 	brightness = 32896;
 
-	convert_custom_brightness(&caps, min, max, &brightness);
+	convert_custom_brightness(&caps, max, &brightness);
 
 	/*
 	 * Exact match: lum=50, brightness_scaled=128
-	 * result = scale_fw_to_input(min, max, DIV_ROUND_CLOSEST(50*128, 101))
+	 * result = scale_fw_to_input(0, max, DIV_ROUND_CLOSEST(50*128, 101))
 	 *        = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(6400, 101))
 	 *        = scale_fw_to_input(0, 65535, 63)
 	 *        = 0 + DIV_ROUND_CLOSEST(63 * 65535, 255) = 16191 (approx)
@@ -1162,12 +1162,12 @@ static void dm_test_custom_brightness_below_first(struct kunit *test)
 
 	/*
 	 * Set brightness low enough that scaled value < 100.
-	 * scale_input_to_fw(0, 65535, x) = DIV_ROUND_CLOSEST(x*255, 65535)
+	 * scale_input_to_fw(65535, x) = DIV_ROUND_CLOSEST(x*255, 65535)
 	 * For result=50: x = 50*65535/255 = 12850
 	 */
 	brightness = 12850;
 
-	convert_custom_brightness(&caps, min, max, &brightness);
+	convert_custom_brightness(&caps, max, &brightness);
 
 	/*
 	 * Below first data point: lum = DIV_ROUND_CLOSEST(40 * 50, 100) = 20
@@ -1207,11 +1207,11 @@ static void dm_test_custom_brightness_interpolation(struct kunit *test)
 
 	/*
 	 * Choose a value between data points 50 and 200.
-	 * scale_input_to_fw(0, 65535, x) = 125 when x = 125*65535/255 = 32125
+	 * scale_input_to_fw(65535, x) = 125 when x = 125*65535/255 = 32125
 	 */
 	brightness = 32125;
 
-	convert_custom_brightness(&caps, min, max, &brightness);
+	convert_custom_brightness(&caps, max, &brightness);
 
 	/*
 	 * The function should interpolate between data points and produce
@@ -1248,13 +1248,13 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 
 	/*
 	 * Choose brightness above the last data point (150).
-	 * scale_input_to_fw(0, 65535, x) = 220 when x = 220*65535/255 = 56533
+	 * scale_input_to_fw(65535, x) = 220 when x = 220*65535/255 = 56533
 	 * After binary search, left >= data_points, clamped → right==left,
 	 * so lum = upper_lum = 60.
 	 */
 	brightness = 56533;
 
-	convert_custom_brightness(&caps, min, max, &brightness);
+	convert_custom_brightness(&caps, max, &brightness);
 
 	/* Output should differ from input (remapped via curve) */
 	KUNIT_EXPECT_TRUE(test, brightness != 56533);
@@ -1288,11 +1288,11 @@ static void dm_test_custom_brightness_single_data_point(struct kunit *test)
 	/*
 	 * Brightness below the single data point triggers the
 	 * "below first" path: lum = DIV_ROUND_CLOSEST(50 * scaled, 128).
-	 * scale_input_to_fw(0, 65535, x) = 64 when x = 64*65535/255 = 16448
+	 * scale_input_to_fw(65535, x) = 64 when x = 64*65535/255 = 16448
 	 */
 	brightness = 16448;
 
-	convert_custom_brightness(&caps, min, max, &brightness);
+	convert_custom_brightness(&caps, max, &brightness);
 
 	KUNIT_EXPECT_TRUE(test, brightness < 16448);
 
@@ -1325,12 +1325,12 @@ static void dm_test_custom_brightness_lower_lum_zero(struct kunit *test)
 
 	/*
 	 * Choose brightness between data points to trigger interpolation.
-	 * scale_input_to_fw(0, 65535, x) = 125 when x = 125*65535/255 = 32125
+	 * scale_input_to_fw(65535, x) = 125 when x = 125*65535/255 = 32125
 	 * With lower_lum == 0, code takes shortcut: lum = upper_lum = 80.
 	 */
 	brightness = 32125;
 
-	convert_custom_brightness(&caps, min, max, &brightness);
+	convert_custom_brightness(&caps, max, &brightness);
 
 	/* Should remap; result should differ from input */
 	KUNIT_EXPECT_TRUE(test, brightness != 32125);
