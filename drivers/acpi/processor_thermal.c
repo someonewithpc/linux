@@ -90,6 +90,7 @@ static int cpufreq_get_cur_state(unsigned int cpu)
 
 static bool cpufreq_update_thermal_limit(unsigned int cpu, struct acpi_processor *pr)
 {
+	unsigned int step = reduction_step(cpu);
 	unsigned long max_freq;
 	int ret;
 
@@ -97,8 +98,15 @@ static bool cpufreq_update_thermal_limit(unsigned int cpu, struct acpi_processor
 	if (!policy)
 		return false;
 
-	max_freq = (policy->cpuinfo.max_freq *
-		(100 - reduction_step(cpu) * cpufreq_thermal_reduction_pctg)) / 100;
+	/*
+	 * cpuinfo.max_freq is lower while boost is off, so a cap computed
+	 * from it at step 0 would stay after boost is turned back on.
+	 */
+	if (!step)
+		max_freq = FREQ_QOS_MAX_DEFAULT_VALUE;
+	else
+		max_freq = (policy->cpuinfo.max_freq *
+			(100 - step * cpufreq_thermal_reduction_pctg)) / 100;
 
 	ret = freq_qos_update_request(&pr->thermal_req, max_freq);
 	if (ret < 0) {
