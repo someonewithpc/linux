@@ -173,6 +173,17 @@ static int __init ac_only_quirk(const struct dmi_system_id *d)
 /* Please keep this list alphabetically sorted */
 static const struct dmi_system_id ac_dmi_table[]  __initconst = {
 	{
+		/*
+		 * ASUS ROG Flow X13 GV301QH notifies AC on a plug-in about
+		 * 400 ms before _PSR reports it online
+		 */
+		.callback = ac_sleep_quirk,
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ROG Flow X13 GV301QH"),
+		},
+	},
+	{
 		/* Kodlix GK45 returning incorrect state */
 		.callback = ac_only_quirk,
 		.matches = {
