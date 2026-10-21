@@ -1125,10 +1125,9 @@ static void dm_test_custom_brightness_exact_match(struct kunit *test)
 
 	/*
 	 * Exact match: lum=50, brightness_scaled=128
-	 * result = scale_fw_to_input(0, max, DIV_ROUND_CLOSEST(50*128, 101))
-	 *        = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(6400, 101))
-	 *        = scale_fw_to_input(0, 65535, 63)
-	 *        = 0 + DIV_ROUND_CLOSEST(63 * 65535, 255) = 16191 (approx)
+	 * result = scale_fw_to_input(0, max, DIV_ROUND_CLOSEST(50*128, 100))
+	 *        = scale_fw_to_input(0, 65535, 64)
+	 *        = 0 + DIV_ROUND_CLOSEST(64 * 65535, 255) = 16448
 	 */
 	KUNIT_EXPECT_TRUE(test, brightness != 32896);
 	KUNIT_EXPECT_TRUE(test, brightness < 32896);
@@ -1171,8 +1170,8 @@ static void dm_test_custom_brightness_below_first(struct kunit *test)
 
 	/*
 	 * Below first data point: lum = DIV_ROUND_CLOSEST(40 * 50, 100) = 20
-	 * Then: scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(20 * 50, 101))
-	 *      = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(1000, 101))
+	 * Then: scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(20 * 50, 100))
+	 *      = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(1000, 100))
 	 *      = scale_fw_to_input(0, 65535, 10)
 	 * The output should be significantly less than input.
 	 */
@@ -1249,13 +1248,15 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 	/*
 	 * Choose brightness above the last data point (150).
 	 * scale_input_to_fw(65535, x) = 220 when x = 220*65535/255 = 56533
-	 * Above the last data point the curve leaves the level as it is.
+	 * Above the last data point the luminance runs from 60 at 150 up to
+	 * 100 at 255, so lum = 60 + DIV_ROUND_CLOSEST(40 * 70, 105) = 87,
+	 * DIV_ROUND_CLOSEST(87 * 220, 100) = 191 and 191 * 65535 / 255 = 49087.
 	 */
 	brightness = 56533;
 
 	convert_custom_brightness(&caps, max, &brightness);
 
-	KUNIT_EXPECT_EQ(test, brightness, 56533U);
+	KUNIT_EXPECT_EQ(test, brightness, 49087U);
 
 	amdgpu_dm_set_dc_debug_mask(saved_mask);
 }
@@ -1524,15 +1525,15 @@ static void dm_test_brightness_from_user_curve_floor(struct kunit *test)
  * rounding to the closest integer at each step:
  *
  * 8000 is signal 31, between (29, 14) and (32, 16), so the luminance is 15
- * and 15 * 31 / 101 = 5 on the firmware scale. That is 1285 on 0..65535
+ * and 15 * 31 / 100 = 5 on the firmware scale. That is 1285 on 0..65535
  * and 3084 + 62451 * 1285 / 65535 = 4309 on min..max
  *
  * 32000 is signal 125, between (123, 60) and (129, 62), so the luminance
- * is 61 and 61 * 125 / 101 = 75 on the firmware scale. That is 19275 on
- * 0..65535 and 3084 + 62451 * 19275 / 65535 = 21452 on min..max
+ * is 61 and 61 * 125 / 100 = 76 on the firmware scale. That is 19532 on
+ * 0..65535 and 3084 + 62451 * 19532 / 65535 = 21697 on min..max
  *
- * 65535 is signal 255, past the last point (247, 98), so the curve leaves
- * it as it is and it comes out as max
+ * 65535 is signal 255, the top of the range past the last point (247, 98),
+ * so the luminance is 100 and the result is max
  */
 static void dm_test_brightness_from_user_curve_values(struct kunit *test)
 {
@@ -1542,7 +1543,7 @@ static void dm_test_brightness_from_user_curve_values(struct kunit *test)
 	set_gv301qh_caps(&caps);
 
 	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 8000), 4309U);
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 32000), 21452U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 32000), 21697U);
 	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 65535), 65535U);
 }
 
