@@ -1125,10 +1125,9 @@ static void dm_test_custom_brightness_exact_match(struct kunit *test)
 
 	/*
 	 * Exact match: lum=50, brightness_scaled=128
-	 * result = scale_fw_to_input(0, max, DIV_ROUND_CLOSEST(50*128, 101))
-	 *        = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(6400, 101))
-	 *        = scale_fw_to_input(0, 65535, 63)
-	 *        = 0 + DIV_ROUND_CLOSEST(63 * 65535, 255) = 16191 (approx)
+	 * result = scale_fw_to_input(0, max, DIV_ROUND_CLOSEST(50*128, 100))
+	 *        = scale_fw_to_input(0, 65535, 64)
+	 *        = 0 + DIV_ROUND_CLOSEST(64 * 65535, 255) = 16448
 	 */
 	KUNIT_EXPECT_TRUE(test, brightness != 32896);
 	KUNIT_EXPECT_TRUE(test, brightness < 32896);
@@ -1171,8 +1170,8 @@ static void dm_test_custom_brightness_below_first(struct kunit *test)
 
 	/*
 	 * Below first data point: lum = DIV_ROUND_CLOSEST(40 * 50, 100) = 20
-	 * Then: scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(20 * 50, 101))
-	 *      = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(1000, 101))
+	 * Then: scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(20 * 50, 100))
+	 *      = scale_fw_to_input(0, 65535, DIV_ROUND_CLOSEST(1000, 100))
 	 *      = scale_fw_to_input(0, 65535, 10)
 	 * The output should be significantly less than input.
 	 */
@@ -1249,16 +1248,15 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 	/*
 	 * Choose brightness above the last data point (150).
 	 * scale_input_to_fw(65535, x) = 220 when x = 220*65535/255 = 56533
-	 * After binary search, left >= data_points, clamped → right==left,
-	 * so lum = upper_lum = 60.
+	 * Above the last data point the luminance runs from 60 at 150 up to
+	 * 100 at 255, so lum = 60 + DIV_ROUND_CLOSEST(40 * 70, 105) = 87,
+	 * DIV_ROUND_CLOSEST(87 * 220, 100) = 191 and 191 * 65535 / 255 = 49087
 	 */
 	brightness = 56533;
 
 	convert_custom_brightness(&caps, max, &brightness);
 
-	/* Output should differ from input (remapped via curve) */
-	KUNIT_EXPECT_TRUE(test, brightness != 56533);
-	KUNIT_EXPECT_TRUE(test, brightness < 56533);
+	KUNIT_EXPECT_EQ(test, brightness, 49087U);
 
 	amdgpu_dm_set_dc_debug_mask(saved_mask);
 }
@@ -1539,26 +1537,23 @@ static void dm_test_brightness_from_user_curve_floor(struct kunit *test)
  * 3084..65535:
  *
  * 8000 is signal 31, between (29, 14) and (32, 16), so the luminance is 15
- * and 15 * 31 / 101 = 5 on the firmware scale. That is 1285 on 0..65535
+ * and 15 * 31 / 100 = 5 on the firmware scale. That is 1285 on 0..65535
  * and 3084 + 62451 * 1285 / 65535 = 4309 on min..max
  *
  * 32000 is signal 125, between (123, 60) and (129, 62), so the luminance
- * is 61 and 61 * 125 / 101 = 75 on the firmware scale. That is 19275 on
- * 0..65535 and 3084 + 62451 * 19275 / 65535 = 21452 on min..max
+ * is 61 and 61 * 125 / 100 = 76 on the firmware scale. That is 19532 on
+ * 0..65535 and 3084 + 62451 * 19532 / 65535 = 21697 on min..max
  *
- * 65535 is signal 255, past the last point (247, 98), so the luminance is
- * 98 and 98 * 255 / 101 = 247 on the firmware scale. That is 63479 on
- * 0..65535 and 3084 + 62451 * 63479 / 65535 = 63576 on min..max
+ * 65535 is signal 255, the top of the range past the last point (247, 98),
+ * so the luminance is 100 and the result is max
  *
  * On the AUX range of 1000..512000 millinits:
  *
  * 200000 is signal 100, between (98, 50) and (103, 52), so the luminance
- * is 51 and 51 * 100 / 101 = 50 on the firmware scale. That is 100392 on
- * 0..512000 and 1000 + 511000 * 100392 / 512000 = 101196 on min..max
+ * is 51 and 51 * 100 / 100 = 51 on the firmware scale. That is 102400 on
+ * 0..512000 and 1000 + 511000 * 102400 / 512000 = 103200 on min..max
  *
- * 512000 is signal 255, so as above it is 247 on the firmware scale. That
- * is 495937 on 0..512000 and 1000 + 511000 * 495937 / 512000 = 495968 on
- * min..max
+ * 512000 is signal 255, so as above the result is max
  */
 static void dm_test_brightness_from_user_curve_values(struct kunit *test)
 {
@@ -1568,12 +1563,12 @@ static void dm_test_brightness_from_user_curve_values(struct kunit *test)
 
 	set_gv301qh_caps(&caps, false);
 	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 8000), 4309U);
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 32000), 21452U);
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 65535), 63576U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 32000), 21697U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 65535), 65535U);
 
 	set_gv301qh_caps(&caps, true);
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 200000), 101196U);
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 512000), 495968U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 200000), 103200U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 512000), 512000U);
 }
 
 static void check_curve_monotonic(struct kunit *test,
@@ -1613,6 +1608,51 @@ static void dm_test_brightness_from_user_curve_monotonic(struct kunit *test)
 
 	set_gv301qh_caps(&caps, true);
 	check_curve_monotonic(test, &caps);
+}
+
+/**
+ * dm_test_custom_brightness_lum_over_100 - Test Custom curve luminance over 100% counts as 100%
+ * @test: The KUnit test context
+ *
+ * With points (100, 50), (200, 150) and (250, 120), both points over 100%
+ * count as 100%. Level 150 comes out as 50 + 50 * 50 / 100 = 75% of 150,
+ * so 113 on the firmware scale, and level 200 comes out as 200. No level
+ * may come out higher than the level above it or higher than max
+ */
+static void dm_test_custom_brightness_lum_over_100(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	u32 brightness, prev = 0;
+	unsigned int level;
+
+	dm_test_enable_custom_curve(test);
+	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
+	caps.data_points = 3;
+	caps.luminance_data[0].input_signal = 100;
+	caps.luminance_data[0].luminance = 50;
+	caps.luminance_data[1].input_signal = 200;
+	caps.luminance_data[1].luminance = 150;
+	caps.luminance_data[2].input_signal = 250;
+	caps.luminance_data[2].luminance = 120;
+
+	for (level = 0; level <= AMDGPU_MAX_BL_LEVEL; level++) {
+		brightness = level * 0x101;
+		convert_custom_brightness(&caps, 65535, &brightness);
+		if (brightness < prev || brightness > 65535) {
+			KUNIT_FAIL(test, "level %u gives %u after %u", level,
+				   brightness, prev);
+			return;
+		}
+		prev = brightness;
+	}
+
+	brightness = 150 * 0x101;
+	convert_custom_brightness(&caps, 65535, &brightness);
+	KUNIT_EXPECT_EQ(test, brightness, 113U * 0x101);
+
+	brightness = 200 * 0x101;
+	convert_custom_brightness(&caps, 65535, &brightness);
+	KUNIT_EXPECT_EQ(test, brightness, 200U * 0x101);
 }
 
 /**
@@ -2175,6 +2215,7 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_brightness_from_user_curve_floor),
 	KUNIT_CASE(dm_test_brightness_from_user_curve_values),
 	KUNIT_CASE(dm_test_brightness_from_user_curve_monotonic),
+	KUNIT_CASE(dm_test_custom_brightness_lum_over_100),
 	KUNIT_CASE(dm_test_brightness_range_zero_signals),
 	/* amdgpu_dm_backlight_fill_props */
 	KUNIT_CASE(dm_test_backlight_fill_props_ac_linear),
