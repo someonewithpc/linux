@@ -194,7 +194,8 @@ STATIC_IFN_KUNIT
 void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 			       unsigned int max, uint32_t *user_brightness)
 {
-	u32 brightness = scale_input_to_fw(max, *user_brightness);
+	u32 brightness = min_t(u32, scale_input_to_fw(max, *user_brightness),
+				 AMDGPU_MAX_BL_LEVEL);
 	u8 lower_signal, upper_signal, upper_lum, lower_lum, lum;
 	int left, right;
 
@@ -211,6 +212,19 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 	if (brightness < caps->luminance_data[0].input_signal) {
 		lum = DIV_ROUND_CLOSEST(caps->luminance_data[0].luminance * brightness,
 					caps->luminance_data[0].input_signal);
+		goto scale;
+	}
+
+	/*
+	 * Above the last data point, interpolate up to full luminance at the
+	 * top of the range, as backlight_signal_to_luminance() does
+	 */
+	lower_signal = caps->luminance_data[caps->data_points - 1].input_signal;
+	lower_lum = min_t(u8, caps->luminance_data[caps->data_points - 1].luminance, 100);
+	if (brightness > lower_signal) {
+		lum = lower_lum + DIV_ROUND_CLOSEST((100 - lower_lum) *
+						    (brightness - lower_signal),
+						    AMDGPU_MAX_BL_LEVEL - lower_signal);
 		goto scale;
 	}
 
@@ -232,10 +246,6 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 			right = mid - 1;
 	}
 
-	/* verify bound */
-	if (left >= caps->data_points)
-		left = caps->data_points - 1;
-
 	/* At this point, left > right */
 	lower_signal = caps->luminance_data[right].input_signal;
 	upper_signal = caps->luminance_data[left].input_signal;
@@ -243,7 +253,7 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 	upper_lum = caps->luminance_data[left].luminance;
 
 	/* interpolate */
-	if (right == left || !lower_lum)
+	if (!lower_lum)
 		lum = upper_lum;
 	else
 		lum = lower_lum + DIV_ROUND_CLOSEST((upper_lum - lower_lum) *
@@ -252,7 +262,7 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 scale:
 	/* convert_brightness_from_user() applies the min..max offset itself */
 	*user_brightness = scale_fw_to_input(0, max,
-					     DIV_ROUND_CLOSEST(lum * brightness, 101));
+					     DIV_ROUND_CLOSEST(lum * brightness, 100));
 }
 
 EXPORT_IF_KUNIT(convert_custom_brightness);
