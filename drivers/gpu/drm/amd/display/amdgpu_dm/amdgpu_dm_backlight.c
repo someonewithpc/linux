@@ -693,12 +693,13 @@ EXPORT_IF_KUNIT(amdgpu_dm_setup_backlight_device);
  * carefully.
  *
  * A write does not program the hardware. The driver stores the level in the
- * connector's current state and sends a hotplug uevent. The level takes
- * effect on the next atomic commit that includes the connector. Userspace
- * that receives the uevent is expected to make such a commit. Adding the
- * connector to the commit is enough. No property needs to change and the
- * commit does not need DRM_MODE_ATOMIC_ALLOW_MODESET. Until that commit, the
- * file reads back the new level while the hardware still uses the old one.
+ * connector's current state and sends a hotplug uevent with CONNECTOR set to
+ * the connector's object ID. The level takes effect on the next atomic commit
+ * that includes the connector. Userspace that receives the uevent is expected
+ * to make such a commit. Adding the connector to the commit is enough. No
+ * property needs to change and the commit does not need
+ * DRM_MODE_ATOMIC_ALLOW_MODESET. Until that commit, the file reads back the
+ * new level while the hardware still uses the old one.
  *
  * Writes fail with -EBUSY once the DRM master has set the connector's
  * 'adaptive backlight modulation' property to a value other than 'sysfs'.
@@ -752,7 +753,7 @@ ssize_t panel_power_savings_store(struct device *device,
 	if (ret)
 		return ret;
 
-	drm_kms_helper_hotplug_event(dev);
+	drm_kms_helper_connector_hotplug_event(connector);
 
 	return count;
 }
