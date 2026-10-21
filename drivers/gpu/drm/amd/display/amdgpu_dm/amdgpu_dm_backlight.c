@@ -732,7 +732,7 @@ ssize_t panel_power_savings_store(struct device *device,
 	if (ret)
 		return ret;
 
-	drm_kms_helper_hotplug_event(dev);
+	drm_kms_helper_connector_hotplug_event(connector);
 
 	return count;
 }
