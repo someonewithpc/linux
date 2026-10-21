@@ -214,6 +214,10 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 		goto scale;
 	}
 
+	/* Above the last data point the curve leaves the level as it is */
+	if (brightness > caps->luminance_data[caps->data_points - 1].input_signal)
+		return;
+
 	left = 0;
 	right = caps->data_points - 1;
 	while (left <= right) {
@@ -232,10 +236,6 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 			right = mid - 1;
 	}
 
-	/* verify bound */
-	if (left >= caps->data_points)
-		left = caps->data_points - 1;
-
 	/* At this point, left > right */
 	lower_signal = caps->luminance_data[right].input_signal;
 	upper_signal = caps->luminance_data[left].input_signal;
@@ -243,7 +243,7 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 	upper_lum = caps->luminance_data[left].luminance;
 
 	/* interpolate */
-	if (right == left || !lower_lum)
+	if (!lower_lum)
 		lum = upper_lum;
 	else
 		lum = lower_lum + DIV_ROUND_CLOSEST((upper_lum - lower_lum) *

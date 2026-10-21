@@ -1249,16 +1249,13 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 	/*
 	 * Choose brightness above the last data point (150).
 	 * scale_input_to_fw(65535, x) = 220 when x = 220*65535/255 = 56533
-	 * After binary search, left >= data_points, clamped → right==left,
-	 * so lum = upper_lum = 60.
+	 * Above the last data point the curve leaves the level as it is.
 	 */
 	brightness = 56533;
 
 	convert_custom_brightness(&caps, max, &brightness);
 
-	/* Output should differ from input (remapped via curve) */
-	KUNIT_EXPECT_TRUE(test, brightness != 56533);
-	KUNIT_EXPECT_TRUE(test, brightness < 56533);
+	KUNIT_EXPECT_EQ(test, brightness, 56533U);
 
 	amdgpu_dm_set_dc_debug_mask(saved_mask);
 }
@@ -1534,9 +1531,8 @@ static void dm_test_brightness_from_user_curve_floor(struct kunit *test)
  * is 61 and 61 * 125 / 101 = 75 on the firmware scale. That is 19275 on
  * 0..65535 and 3084 + 62451 * 19275 / 65535 = 21452 on min..max
  *
- * 65535 is signal 255, past the last point (247, 98), so the luminance is
- * 98 and 98 * 255 / 101 = 247 on the firmware scale. That is 63479 on
- * 0..65535 and 3084 + 62451 * 63479 / 65535 = 63576 on min..max
+ * 65535 is signal 255, past the last point (247, 98), so the curve leaves
+ * it as it is and it comes out as max
  */
 static void dm_test_brightness_from_user_curve_values(struct kunit *test)
 {
@@ -1547,7 +1543,7 @@ static void dm_test_brightness_from_user_curve_values(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 8000), 4309U);
 	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 32000), 21452U);
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 65535), 63576U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 65535), 65535U);
 }
 
 /**
