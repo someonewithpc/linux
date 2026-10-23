@@ -20,6 +20,8 @@ struct iwl_trans_dev_restart_data {
 	unsigned int restart_count;
 	time64_t last_error;
 	bool backoff;
+	unsigned int probe_reset_count;
+	time64_t last_probe_reset;
 	char name[];
 };
 
@@ -261,6 +263,53 @@ static void iwl_trans_restart_wk(struct work_struct *wk)
 	default:
 		iwl_trans_reset(trans, mode);
 		break;
+	}
+}
+
+#define IWL_TRANS_PROBE_RESETS		2
+#define IWL_TRANS_PROBE_RESET_OK_TIME	60 /* seconds */
+
+/**
+ * iwl_trans_probe_reset - reset a device that failed to wake up at probe
+ * @trans: the transport, about to be freed by the failing probe
+ *
+ * A device can stay stuck across warm reboots if nothing resets its slot,
+ * e.g. after the platform hung with the firmware still running. Schedule
+ * a function reset that removes the device and rescans the bus so that
+ * probe runs again on a freshly reset device. The count survives the
+ * remove/rescan, so a device that never wakes up gets a bounded number of
+ * resets. It starts over once no reset was done for a while, e.g. after a
+ * manual rebind or when another card shows up at the same address
+ */
+void iwl_trans_probe_reset(struct iwl_trans *trans)
+{
+	struct iwl_trans_dev_restart_data *data;
+	time64_t now = ktime_get_boottime_seconds();
+
+	if (!iwlwifi_mod_params.fw_restart)
+		return;
+
+	data = iwl_trans_get_restart_data(trans->dev);
+	if (!data)
+		return;
+
+	if (now - data->last_probe_reset >= IWL_TRANS_PROBE_RESET_OK_TIME)
+		data->probe_reset_count = 0;
+
+	if (data->probe_reset_count >= IWL_TRANS_PROBE_RESETS) {
+		IWL_ERR(trans,
+			"Device failed to wake up after %u resets, giving up\n",
+			data->probe_reset_count);
+		return;
+	}
+
+	IWL_ERR(trans, "Device failed to wake up at probe - reset\n");
+	iwl_trans_reset(trans, IWL_RESET_MODE_FUNC_RESET);
+
+	/* the transport is only marked dead once the reset is scheduled */
+	if (iwl_trans_is_dead(trans)) {
+		data->probe_reset_count++;
+		data->last_probe_reset = now;
 	}
 }
 

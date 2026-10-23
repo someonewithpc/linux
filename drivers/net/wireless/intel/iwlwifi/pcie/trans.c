@@ -2151,7 +2151,7 @@ void iwl_trans_pcie_check_product_reset_status(struct pci_dev *pdev)
 	ACPI_FREE(res);
 }
 
-static void iwl_trans_pcie_call_reset(struct pci_dev *pdev)
+static bool iwl_trans_pcie_call_reset(struct pci_dev *pdev)
 {
 #ifdef CONFIG_ACPI
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -2191,12 +2191,12 @@ out:
 	kfree(buffer.pointer);
 	if (!ret) {
 		IWL_DEBUG_DEV_POWER(&pdev->dev, "called _RST on _PRR object\n");
-		return;
+		return true;
 	}
 	IWL_DEBUG_DEV_POWER(&pdev->dev,
 			    "No BIOS support, using pci_reset_function()\n");
 #endif
-	pci_reset_function(pdev);
+	return false;
 }
 
 struct iwl_trans_pcie_removal {
@@ -2213,12 +2213,13 @@ static void iwl_trans_pcie_removal_wk(struct work_struct *wk)
 	struct pci_dev *pdev = removal->pdev;
 	static char *prop[] = {"EVENT=INACCESSIBLE", NULL};
 	struct pci_bus *bus;
+	bool need_flr = false;
 
 	pci_lock_rescan_remove();
 
 	bus = pdev->bus;
 	/* in this case, something else already removed the device */
-	if (!bus)
+	if (!bus || !device_is_registered(&pdev->dev))
 		goto out;
 
 	kobject_uevent_env(&pdev->dev.kobj, KOBJ_CHANGE, prop);
@@ -2270,15 +2271,24 @@ static void iwl_trans_pcie_removal_wk(struct work_struct *wk)
 		}
 	}
 
+	/*
+	 * Don't run _RST while a probe still uses the device, e.g. the failed
+	 * probe that scheduled this. pci_reset_function() takes the lock
+	 * itself, so it runs after the unlock
+	 */
+	device_lock(&pdev->dev);
 	iwl_trans_pcie_set_product_reset(pdev,
 					 removal->mode ==
 						IWL_RESET_MODE_PROD_RESET,
 					 removal->integrated);
 	if (removal->mode >= IWL_RESET_MODE_FUNC_RESET)
-		iwl_trans_pcie_call_reset(pdev);
+		need_flr = !iwl_trans_pcie_call_reset(pdev);
+	device_unlock(&pdev->dev);
+
+	if (need_flr)
+		pci_reset_function(pdev);
 
 	pci_stop_and_remove_bus_device(pdev);
-	pci_dev_put(pdev);
 
 	if (removal->mode >= IWL_RESET_MODE_RESCAN) {
 		if (bus->parent)
@@ -2288,6 +2298,7 @@ static void iwl_trans_pcie_removal_wk(struct work_struct *wk)
 
 out:
 	pci_unlock_rescan_remove();
+	pci_dev_put(pdev);
 
 	kfree(removal);
 	module_put(THIS_MODULE);
@@ -4218,8 +4229,10 @@ int _iwl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent,
 	ret = iwl_pcie_prepare_card_hw(iwl_trans);
 	if (!ret) {
 		ret = iwl_trans_activate_nic(iwl_trans);
-		if (ret)
+		if (ret) {
+			iwl_trans_probe_reset(iwl_trans);
 			goto out_free_trans;
+		}
 		if (iwl_trans_grab_nic_access(iwl_trans)) {
 			get_crf_id(iwl_trans, &info, &hw_wfpm_id);
 			/* all good */

@@ -1223,6 +1223,7 @@ enum iwl_reset_mode {
 
 void iwl_trans_reset(struct iwl_trans *trans, enum iwl_reset_mode mode);
 void iwl_trans_fw_reset_handshake(struct iwl_trans *trans);
+void iwl_trans_probe_reset(struct iwl_trans *trans);
 
 /**
  * struct iwl_trans_ops - bus-specific transport operations
