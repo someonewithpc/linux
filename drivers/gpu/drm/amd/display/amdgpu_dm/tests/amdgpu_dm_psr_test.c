@@ -240,6 +240,39 @@ static void dm_test_set_psr_caps_no_dmub_psr(struct kunit *test)
 }
 
 /**
+ * dm_test_set_psr_caps_pre_dcn30() - DMUB caps are not required before DCN 3.0.
+ * @test: KUnit test context.
+ */
+static void dm_test_set_psr_caps_pre_dcn30(struct kunit *test)
+{
+	struct dc_link *link = alloc_test_psr_caps_link(test);
+	struct amdgpu_dm_connector *aconnector = alloc_test_aconnector(test);
+
+	link->ctx->dce_version = DCN_VERSION_2_1;
+	link->ctx->dc->caps.dmub_caps.psr = false;
+
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_set_psr_caps(link, aconnector));
+	KUNIT_EXPECT_EQ(test, link->psr_settings.psr_version, DC_PSR_VERSION_1);
+}
+
+/**
+ * dm_test_set_psr_caps_dcn30_no_dmub_psr() - DCN 3.0 requires DMUB caps.
+ * @test: KUnit test context.
+ */
+static void dm_test_set_psr_caps_dcn30_no_dmub_psr(struct kunit *test)
+{
+	struct dc_link *link = alloc_test_psr_caps_link(test);
+	struct amdgpu_dm_connector *aconnector = alloc_test_aconnector(test);
+
+	link->ctx->dce_version = DCN_VERSION_3_0;
+	link->ctx->dc->caps.dmub_caps.psr = false;
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_set_psr_caps(link, aconnector));
+	KUNIT_EXPECT_EQ(test, link->psr_settings.psr_version,
+			DC_PSR_VERSION_UNSUPPORTED);
+}
+
+/**
  * dm_test_set_psr_caps_non_edp() - Only eDP links can enable PSR.
  * @test: KUnit test context.
  */
@@ -712,6 +745,8 @@ static struct kunit_case dm_psr_test_cases[] = {
 	KUNIT_CASE(dm_test_set_psr_caps_null_link),
 	KUNIT_CASE(dm_test_set_psr_caps_null_connector),
 	KUNIT_CASE(dm_test_set_psr_caps_no_dmub_psr),
+	KUNIT_CASE(dm_test_set_psr_caps_pre_dcn30),
+	KUNIT_CASE(dm_test_set_psr_caps_dcn30_no_dmub_psr),
 	KUNIT_CASE(dm_test_set_psr_caps_non_edp),
 	KUNIT_CASE(dm_test_set_psr_caps_disconnected),
 	KUNIT_CASE(dm_test_set_psr_caps_no_dpcd_psr),
