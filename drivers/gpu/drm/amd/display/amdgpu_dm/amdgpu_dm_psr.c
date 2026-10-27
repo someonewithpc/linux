@@ -111,7 +111,13 @@ bool amdgpu_dm_set_psr_caps(struct dc_link *link, struct amdgpu_dm_connector *ac
 	/* Reset psr version first */
 	link->psr_settings.psr_version = DC_PSR_VERSION_UNSUPPORTED;
 
-	if (!dc->caps.dmub_caps.psr)
+	/*
+	 * Only DCN 3.0 and later ASICs with a DMUB PSR engine query the DMUB
+	 * feature caps. Older ASICs drive PSR through DMCU or DMUB without
+	 * that query, and edp_setup_psr() already bails out when neither
+	 * engine exists
+	 */
+	if (dc->ctx->dce_version >= DCN_VERSION_3_0 && !dc->caps.dmub_caps.psr)
 		return false;
 
 	if (!(link->connector_signal & SIGNAL_TYPE_EDP))
