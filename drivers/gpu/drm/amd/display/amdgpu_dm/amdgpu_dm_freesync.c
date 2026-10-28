@@ -414,8 +414,16 @@ void amdgpu_dm_handle_vrr_transition(struct amdgpu_display_manager *dm,
 				     struct dm_crtc_state *new_state)
 {
 	struct amdgpu_device *adev = dm->adev;
-	bool old_vrr_active = amdgpu_dm_crtc_vrr_active(old_state);
-	bool new_vrr_active = amdgpu_dm_crtc_vrr_active(new_state);
+	/*
+	 * A disabled CRTC keeps its freesync state, but drm_crtc_vblank_get()
+	 * fails there because vblank is off. Hold the reference only while
+	 * the CRTC is active as well, which also covers resume, where the
+	 * reset state lost track of the reference taken before suspend
+	 */
+	bool old_vrr_active = old_state->base.active &&
+			      amdgpu_dm_crtc_vrr_active(old_state);
+	bool new_vrr_active = new_state->base.active &&
+			      amdgpu_dm_crtc_vrr_active(new_state);
 
 	/* Only DCE gates vupdate on VRR, keep it enabled for DCN */
 	bool vrr_gates_vupdate = amdgpu_ip_version(adev, DCE_HWIP, 0) == 0;
@@ -451,6 +459,14 @@ void amdgpu_dm_handle_vrr_transition(struct amdgpu_display_manager *dm,
 		drm_crtc_vblank_put(new_state->base.crtc);
 		drm_dbg_driver(new_state->base.crtc->dev, "%s: crtc=%u VRR on->off: Drop vblank ref\n",
 				 __func__, new_state->base.crtc->base.id);
+
+		/*
+		 * A disabled CRTC has no stream, so there are no PSR or Replay
+		 * events to clear. Leave IPS as amdgpu_dm_commit_streams() set
+		 * it, which allows it once the last display is gone
+		 */
+		if (!new_state->stream)
+			return;
 
 		scoped_guard(mutex, &dm->dc_lock) {
 			dc_exit_ips_for_hw_access(dm->dc);

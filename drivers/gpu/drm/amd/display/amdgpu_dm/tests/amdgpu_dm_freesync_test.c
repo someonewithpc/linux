@@ -855,8 +855,10 @@ static void dm_test_handle_vrr_transition_round_trip(struct kunit *test)
 	mutex_init(&adev->dm.dc_lock);
 
 	old_state.base.crtc = &acrtc->base;
+	old_state.base.active = true;
 	old_state.stream = stream;
 	new_state.base.crtc = &acrtc->base;
+	new_state.base.active = true;
 	new_state.stream = stream;
 	new_state.freesync_config.state = VRR_STATE_ACTIVE_VARIABLE;
 
@@ -865,6 +867,163 @@ static void dm_test_handle_vrr_transition_round_trip(struct kunit *test)
 
 	amdgpu_dm_handle_vrr_transition(&adev->dm, &new_state, &old_state);
 	KUNIT_EXPECT_EQ(test, atomic_read(&vblank->refcount), 0);
+}
+
+/*
+ * Sets up a transition on a CRTC whose vblank is on with two references
+ * held, so a get or put never has to enable or disable it
+ */
+static struct amdgpu_display_manager *
+dm_test_vrr_transition_setup(struct kunit *test,
+			     bool old_active, enum mod_vrr_state old_vrr,
+			     bool new_active, enum mod_vrr_state new_vrr,
+			     struct dm_crtc_state **old_state,
+			     struct dm_crtc_state **new_state)
+{
+	struct amdgpu_device *adev = dm_kunit_alloc_adev(test);
+	struct amdgpu_display_manager *dm = dm_kunit_alloc_dm(test);
+	struct drm_crtc *crtc;
+
+	KUNIT_ASSERT_EQ(test, drm_vblank_init(&adev->ddev, 1), 0);
+	adev->ip_versions[DCE_HWIP][0] = IP_VERSION(2, 1, 0);
+	dm->adev = adev;
+	mutex_init(&dm->dc_lock);
+
+	crtc = kunit_kzalloc(test, sizeof(*crtc), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, crtc);
+	crtc->dev = &adev->ddev;
+
+	*old_state = kunit_kzalloc(test, sizeof(**old_state), GFP_KERNEL);
+	*new_state = kunit_kzalloc(test, sizeof(**new_state), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, *old_state);
+	KUNIT_ASSERT_NOT_NULL(test, *new_state);
+	(*old_state)->base.crtc = crtc;
+	(*old_state)->base.active = old_active;
+	(*old_state)->freesync_config.state = old_vrr;
+	(*new_state)->base.crtc = crtc;
+	(*new_state)->base.active = new_active;
+	(*new_state)->freesync_config.state = new_vrr;
+
+	adev->ddev.vblank[0].enabled = true;
+	atomic_set(&adev->ddev.vblank[0].refcount, 2);
+
+	return dm;
+}
+
+/* Returns the refcount after the transition */
+static int dm_test_vrr_transition_run(struct amdgpu_display_manager *dm,
+				      struct dm_crtc_state *old_state,
+				      struct dm_crtc_state *new_state)
+{
+	struct drm_vblank_crtc *vblank = &dm->adev->ddev.vblank[0];
+	int refcount;
+
+	amdgpu_dm_handle_vrr_transition(dm, old_state, new_state);
+	refcount = atomic_read(&vblank->refcount);
+
+	/* drm_vblank_init_release() warns if vblank is still enabled */
+	vblank->enabled = false;
+	atomic_set(&vblank->refcount, 0);
+
+	return refcount;
+}
+
+static int dm_test_vrr_transition_refcount(struct kunit *test,
+					   bool old_active, enum mod_vrr_state old_vrr,
+					   bool new_active, enum mod_vrr_state new_vrr)
+{
+	struct dm_crtc_state *old_state, *new_state;
+	struct amdgpu_display_manager *dm;
+
+	dm = dm_test_vrr_transition_setup(test, old_active, old_vrr,
+					  new_active, new_vrr,
+					  &old_state, &new_state);
+
+	return dm_test_vrr_transition_run(dm, old_state, new_state);
+}
+
+/**
+ * dm_test_vrr_transition_crtc_off_drops_ref - Test disabling the CRTC drops the ref
+ * @test: The KUnit test context
+ *
+ * Disabling the CRTC keeps the freesync state, as on suspend or DPMS off.
+ * The reference must still be dropped, since resume restores the state from
+ * a reset one and takes a new reference
+ */
+static void dm_test_vrr_transition_crtc_off_drops_ref(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			dm_test_vrr_transition_refcount(test, true, VRR_STATE_ACTIVE_VARIABLE,
+							false, VRR_STATE_ACTIVE_VARIABLE),
+			1);
+}
+
+/**
+ * dm_test_vrr_transition_crtc_on_takes_ref - Test enabling the CRTC takes the ref
+ * @test: The KUnit test context
+ *
+ * Covers resume, where the old state is a reset one, and DPMS on
+ */
+static void dm_test_vrr_transition_crtc_on_takes_ref(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			dm_test_vrr_transition_refcount(test, false, VRR_STATE_UNSUPPORTED,
+							true, VRR_STATE_ACTIVE_VARIABLE),
+			3);
+}
+
+/**
+ * dm_test_vrr_transition_crtc_off_keeps_ref - Test no ref change while off
+ * @test: The KUnit test context
+ *
+ * A disabled CRTC has vblank off, so a VRR change there must neither take
+ * nor drop a reference
+ */
+static void dm_test_vrr_transition_crtc_off_keeps_ref(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			dm_test_vrr_transition_refcount(test, false, VRR_STATE_UNSUPPORTED,
+							false, VRR_STATE_ACTIVE_VARIABLE),
+			2);
+}
+
+static int dm_test_vrr_idle_calls;
+
+static bool dm_test_vrr_apply_idle(struct dc *dc, bool allow)
+{
+	dm_test_vrr_idle_calls++;
+
+	/* Not applied, so dc_allow_idle_optimizations() skips its logging */
+	return false;
+}
+
+/**
+ * dm_test_vrr_transition_crtc_off_keeps_ips - Test disabling the CRTC leaves IPS alone
+ * @test: The KUnit test context
+ *
+ * amdgpu_dm_commit_streams() allows IPS once the last display is gone. The
+ * disabled CRTC has no stream, so there is nothing for the VRR transition
+ * to program, and it must not disallow IPS again
+ */
+static void dm_test_vrr_transition_crtc_off_keeps_ips(struct kunit *test)
+{
+	struct dm_crtc_state *old_state, *new_state;
+	struct amdgpu_display_manager *dm;
+	struct dc *dc;
+
+	dm = dm_test_vrr_transition_setup(test, true, VRR_STATE_ACTIVE_VARIABLE,
+					  false, VRR_STATE_ACTIVE_VARIABLE,
+					  &old_state, &new_state);
+	dc = dm->dc;
+	dc->caps.ips_support = true;
+	dc->caps.is_apu = true;
+	dc->idle_optimizations_allowed = true;
+	dc->clk_mgr = dm_kunit_alloc_clk_mgr(test);
+	dc->hwss.apply_idle_power_optimizations = dm_test_vrr_apply_idle;
+	dm_test_vrr_idle_calls = 0;
+
+	KUNIT_EXPECT_EQ(test, dm_test_vrr_transition_run(dm, old_state, new_state), 1);
+	KUNIT_EXPECT_EQ(test, dm_test_vrr_idle_calls, 0);
 }
 
 static struct kunit_case amdgpu_dm_freesync_tests[] = {
@@ -910,6 +1069,10 @@ static struct kunit_case amdgpu_dm_freesync_tests[] = {
 	/* amdgpu_dm_handle_vrr_transition */
 	KUNIT_CASE(dm_test_handle_vrr_transition_inactive),
 	KUNIT_CASE(dm_test_handle_vrr_transition_round_trip),
+	KUNIT_CASE(dm_test_vrr_transition_crtc_off_drops_ref),
+	KUNIT_CASE(dm_test_vrr_transition_crtc_on_takes_ref),
+	KUNIT_CASE(dm_test_vrr_transition_crtc_off_keeps_ref),
+	KUNIT_CASE(dm_test_vrr_transition_crtc_off_keeps_ips),
 	{}
 };
 
