@@ -14,6 +14,8 @@
 #include "amdgpu_dm_psr.h"
 #include "amdgpu_dm_kunit_test_helpers.h"
 #include "power_helpers.h"
+#include "dce/dmub_psr.h"
+#include "dmcu.h"
 
 static struct dc_stream_state *alloc_test_psr_stream(struct kunit *test)
 {
@@ -63,7 +65,13 @@ static struct dc_link *alloc_test_psrsu_link(struct kunit *test)
 static struct dc_link *alloc_test_psr_caps_link(struct kunit *test)
 {
 	struct dc_link *link = alloc_test_psrsu_link(test);
+	struct resource_pool *res_pool;
 
+	res_pool = kunit_kzalloc(test, sizeof(*res_pool), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res_pool);
+	res_pool->psr = kunit_kzalloc(test, sizeof(*res_pool->psr), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res_pool->psr);
+	link->ctx->dc->res_pool = res_pool;
 	link->ctx->dc->caps.dmub_caps.psr = true;
 	link->connector_signal = SIGNAL_TYPE_EDP;
 	link->type = dc_connection_single;
@@ -233,6 +241,94 @@ static void dm_test_set_psr_caps_no_dmub_psr(struct kunit *test)
 
 	link->psr_settings.psr_version = DC_PSR_VERSION_1;
 	link->ctx->dc->caps.dmub_caps.psr = false;
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_set_psr_caps(link, aconnector));
+	KUNIT_EXPECT_EQ(test, link->psr_settings.psr_version,
+			DC_PSR_VERSION_UNSUPPORTED);
+}
+
+static bool dm_test_dmcu_running(struct dmcu *dmcu)
+{
+	return true;
+}
+
+static bool dm_test_dmcu_stopped(struct dmcu *dmcu)
+{
+	return false;
+}
+
+static const struct dmcu_funcs dm_test_dmcu_running_funcs = {
+	.is_dmcu_initialized = dm_test_dmcu_running,
+};
+
+static const struct dmcu_funcs dm_test_dmcu_stopped_funcs = {
+	.is_dmcu_initialized = dm_test_dmcu_stopped,
+};
+
+/* Replaces the DMUB PSR engine with a DMCU using the given funcs */
+static void use_test_dmcu(struct kunit *test, struct dc_link *link,
+			  const struct dmcu_funcs *funcs)
+{
+	struct resource_pool *res_pool = link->ctx->dc->res_pool;
+
+	res_pool->psr = NULL;
+	res_pool->dmcu = kunit_kzalloc(test, sizeof(*res_pool->dmcu), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res_pool->dmcu);
+	res_pool->dmcu->funcs = funcs;
+}
+
+/**
+ * dm_test_set_psr_caps_dmcu_psr() - DMCU PSR doesn't need DMUB caps.
+ * @test: KUnit test context.
+ *
+ * Without a DMUB PSR engine DC drives PSR through DMCU, which reports no
+ * feature caps.
+ */
+static void dm_test_set_psr_caps_dmcu_psr(struct kunit *test)
+{
+	struct dc_link *link = alloc_test_psr_caps_link(test);
+	struct amdgpu_dm_connector *aconnector = alloc_test_aconnector(test);
+
+	use_test_dmcu(test, link, &dm_test_dmcu_running_funcs);
+	link->ctx->dc->caps.dmub_caps.psr = false;
+
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_set_psr_caps(link, aconnector));
+	KUNIT_EXPECT_EQ(test, link->psr_settings.psr_version, DC_PSR_VERSION_1);
+}
+
+/**
+ * dm_test_set_psr_caps_dmcu_stopped() - No PSR on a DMCU that isn't running.
+ * @test: KUnit test context.
+ *
+ * DC creates the DMCU even when its firmware wasn't loaded, and
+ * edp_setup_psr() can't enable PSR on it then.
+ */
+static void dm_test_set_psr_caps_dmcu_stopped(struct kunit *test)
+{
+	struct dc_link *link = alloc_test_psr_caps_link(test);
+	struct amdgpu_dm_connector *aconnector = alloc_test_aconnector(test);
+
+	use_test_dmcu(test, link, &dm_test_dmcu_stopped_funcs);
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_set_psr_caps(link, aconnector));
+	KUNIT_EXPECT_EQ(test, link->psr_settings.psr_version,
+			DC_PSR_VERSION_UNSUPPORTED);
+}
+
+/**
+ * dm_test_set_psr_caps_no_psr_engine() - No PSR without a PSR engine.
+ * @test: KUnit test context.
+ *
+ * With neither a DMUB PSR engine nor a DMCU, edp_setup_psr() can't enable
+ * PSR, so the link must not report it either.
+ */
+static void dm_test_set_psr_caps_no_psr_engine(struct kunit *test)
+{
+	struct dc_link *link = alloc_test_psr_caps_link(test);
+	struct amdgpu_dm_connector *aconnector = alloc_test_aconnector(test);
+
+	link->ctx->dc->res_pool->psr = NULL;
+	link->ctx->dc->res_pool->dmcu = NULL;
 
 	KUNIT_EXPECT_FALSE(test, amdgpu_dm_set_psr_caps(link, aconnector));
 	KUNIT_EXPECT_EQ(test, link->psr_settings.psr_version,
@@ -712,6 +808,9 @@ static struct kunit_case dm_psr_test_cases[] = {
 	KUNIT_CASE(dm_test_set_psr_caps_null_link),
 	KUNIT_CASE(dm_test_set_psr_caps_null_connector),
 	KUNIT_CASE(dm_test_set_psr_caps_no_dmub_psr),
+	KUNIT_CASE(dm_test_set_psr_caps_dmcu_psr),
+	KUNIT_CASE(dm_test_set_psr_caps_dmcu_stopped),
+	KUNIT_CASE(dm_test_set_psr_caps_no_psr_engine),
 	KUNIT_CASE(dm_test_set_psr_caps_non_edp),
 	KUNIT_CASE(dm_test_set_psr_caps_disconnected),
 	KUNIT_CASE(dm_test_set_psr_caps_no_dpcd_psr),

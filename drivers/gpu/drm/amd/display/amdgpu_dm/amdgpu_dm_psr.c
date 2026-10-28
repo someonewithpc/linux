@@ -28,6 +28,7 @@
 #include "amdgpu.h"
 #include "dc_dmub_srv.h"
 #include "dc.h"
+#include "dc/inc/core_types.h"
 #include "amdgpu_dm.h"
 #include "modules/power/power_helpers.h"
 #include "dm_helpers.h"
@@ -111,7 +112,15 @@ bool amdgpu_dm_set_psr_caps(struct dc_link *link, struct amdgpu_dm_connector *ac
 	/* Reset psr version first */
 	link->psr_settings.psr_version = DC_PSR_VERSION_UNSUPPORTED;
 
-	if (!dc->caps.dmub_caps.psr)
+	/*
+	 * DC drives PSR through a DMUB PSR engine or through DMCU, like
+	 * edp_setup_psr() picks, and DMCU only with its firmware running.
+	 * Only DMUB reports feature caps
+	 */
+	if (!dc->res_pool->psr && !dc_is_dmcu_initialized(dc))
+		return false;
+
+	if (dc->res_pool->psr && !dc->caps.dmub_caps.psr)
 		return false;
 
 	if (!(link->connector_signal & SIGNAL_TYPE_EDP))
