@@ -1941,6 +1941,12 @@ void dcn10_init_hw(struct dc *dc)
 
 	if (dc->clk_mgr && dc->clk_mgr->funcs->notify_wm_ranges)
 		dc->clk_mgr->funcs->notify_wm_ranges(dc->clk_mgr);
+
+	/* DMUB reports whether it supports PSR when DC drives PSR through it */
+	if (dc->ctx->dmub_srv && dc->res_pool->psr) {
+		dc_dmub_srv_query_caps_cmd(dc->ctx->dmub_srv);
+		dc->caps.dmub_caps.psr = dc->ctx->dmub_srv->dmub->feature_caps.psr;
+	}
 }
 
 /* In headless boot cases, DIG may be turned
