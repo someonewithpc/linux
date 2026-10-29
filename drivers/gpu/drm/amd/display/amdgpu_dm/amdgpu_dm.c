@@ -3895,7 +3895,8 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 				    struct drm_device *dev,
 				    struct amdgpu_display_manager *dm,
 				    struct drm_crtc *pcrtc,
-				    bool wait_for_vblank)
+				    bool wait_for_vblank,
+				    bool abm_sent)
 {
 	u32 i;
 	u64 timestamp_ns = ktime_get_ns();
@@ -4245,7 +4246,8 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 		}
 
 		acrtc_state->stream->abm_level = acrtc_state->abm_level;
-		if (acrtc_state->abm_level != dm_old_crtc_state->abm_level) {
+		/* The connector loop in amdgpu_dm_atomic_commit_tail() may have sent it */
+		if (!abm_sent && acrtc_state->abm_level != dm_old_crtc_state->abm_level) {
 			bundle->stream_update.abm_level = &acrtc_state->abm_level;
 			stream_update_needed = true;
 		}
@@ -5230,6 +5232,7 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 	struct drm_connector_state *old_con_state = NULL, *new_con_state = NULL;
 	struct dm_crtc_state *dm_old_crtc_state, *dm_new_crtc_state;
 	int crtc_disable_count = 0;
+	u32 abm_sent = 0;
 
 	trace_amdgpu_dm_atomic_commit_tail_begin(state);
 
@@ -5255,6 +5258,7 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 		struct dc_stream_status *status = NULL;
 		bool abm_changed, hdr_changed, scaling_changed, output_color_space_changed = false;
 		struct dm_sr_hold sr_hold = {};
+		bool updated;
 
 		memset(&stream_update, 0, sizeof(stream_update));
 
@@ -5339,14 +5343,16 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 		dc_exit_ips_for_hw_access(dm->dc);
 		if (abm_changed)
 			sr_hold = dm_hold_self_refresh(dm, dm_new_crtc_state->stream);
-		dc_update_planes_and_stream(dm->dc,
-					    dummy_updates,
-					    status->plane_count,
-					    dm_new_crtc_state->stream,
-					    &stream_update);
+		updated = dc_update_planes_and_stream(dm->dc,
+						      dummy_updates,
+						      status->plane_count,
+						      dm_new_crtc_state->stream,
+						      &stream_update);
 		dm_release_self_refresh(dm, dm_new_crtc_state->stream, sr_hold);
 		mutex_unlock(&dm->dc_lock);
 		kfree(dummy_updates);
+		if (abm_changed && updated)
+			abm_sent |= drm_crtc_mask(&acrtc->base);
 
 		drm_connector_update_privacy_screen(new_con_state);
 	}
@@ -5440,7 +5446,8 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 		dm_new_crtc_state = to_dm_crtc_state(new_crtc_state);
 
 		if (dm_new_crtc_state->stream)
-			amdgpu_dm_commit_planes(state, dev, dm, crtc, wait_for_vblank);
+			amdgpu_dm_commit_planes(state, dev, dm, crtc, wait_for_vblank,
+						abm_sent & drm_crtc_mask(crtc));
 	}
 
 	/* Enable writeback */
