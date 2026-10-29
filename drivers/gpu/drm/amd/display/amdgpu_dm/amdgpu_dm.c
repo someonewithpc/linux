@@ -4137,6 +4137,20 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 			amdgpu_dm_replay_set_event(dm, acrtc_state->stream, true,
 				replay_event_immediate_flip, true);
 		}
+		/*
+		 * An abm_level change alone is a fast update, which skips
+		 * amdgpu_dm_commit_streams() and the self-refresh pause in
+		 * amdgpu_dm_mod_power_update_streams(). Program ABM with
+		 * self-refresh off, as the backlight path does.
+		 * amdgpu_dm_enable_self_refresh() clears the event
+		 */
+		if (bundle->stream_update.abm_level) {
+			dc_exit_ips_for_hw_access(dm->dc);
+			amdgpu_dm_psr_set_event(dm, acrtc_state->stream, true,
+				psr_event_hw_programming, true);
+			amdgpu_dm_replay_set_event(dm, acrtc_state->stream, true,
+				replay_event_hw_programming, true);
+		}
 		update_planes_and_stream_adapter(dm->dc,
 					 acrtc_state->update_type,
 					 planes_count,
@@ -5256,6 +5270,13 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 
 		mutex_lock(&dm->dc_lock);
 		dc_exit_ips_for_hw_access(dm->dc);
+		/* Cleared by amdgpu_dm_enable_self_refresh() in the plane commit */
+		if (abm_changed) {
+			amdgpu_dm_psr_set_event(dm, dm_new_crtc_state->stream, true,
+				psr_event_hw_programming, true);
+			amdgpu_dm_replay_set_event(dm, dm_new_crtc_state->stream, true,
+				replay_event_hw_programming, true);
+		}
 		dc_update_planes_and_stream(dm->dc,
 					    dummy_updates,
 					    status->plane_count,
