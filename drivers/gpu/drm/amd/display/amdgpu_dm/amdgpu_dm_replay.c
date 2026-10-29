@@ -208,3 +208,28 @@ bool amdgpu_dm_replay_set_event(struct amdgpu_display_manager *dm,
 					 set_event, event, wait_for_disable);
 }
 EXPORT_IF_KUNIT(amdgpu_dm_replay_set_event);
+
+/**
+ * amdgpu_dm_replay_event_is_set() - check whether a replay event is set for a stream
+ * @dm: pointer to amdgpu_display_manager
+ * @stream: pointer to dc_stream_state
+ * @event: replay event type
+ *
+ * Return: true if replay is enabled on @stream and @event is set, false otherwise
+ */
+bool amdgpu_dm_replay_event_is_set(struct amdgpu_display_manager *dm,
+				   struct dc_stream_state *stream,
+				   enum replay_event event)
+{
+	unsigned int replay_events;
+
+	if (!stream || !stream->link ||
+	    !stream->link->replay_settings.replay_feature_enabled)
+		return false;
+
+	if (!mod_power_get_replay_event(dm->power_module, stream, &replay_events))
+		return false;
+
+	return replay_events & event;
+}
+EXPORT_IF_KUNIT(amdgpu_dm_replay_event_is_set);

@@ -627,6 +627,62 @@ static void dm_test_psr_set_event_updates_event(struct kunit *test)
 }
 /* End of tests for amdgpu_dm_psr_set_event() */
 
+/* Tests for amdgpu_dm_psr_event_is_set() */
+
+/**
+ * dm_test_psr_event_is_set_psr_not_enabled() - Disabled PSR reports no event.
+ * @test: KUnit test context.
+ */
+static void dm_test_psr_event_is_set_psr_not_enabled(struct kunit *test)
+{
+	struct amdgpu_display_manager *dm = dm_kunit_alloc_dm(test);
+	struct dc_stream_state *stream = alloc_test_psr_stream(test);
+	struct psr_caps caps = {0};
+	struct core_power *core_power;
+
+	caps.psr_version = 1;
+	core_power = create_test_power_module(test, stream, &caps);
+	dm->power_module = &core_power->mod_public;
+	stream->link->psr_settings.psr_feature_enabled = false;
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_psr_event_is_set(dm, stream, psr_event_vsync));
+}
+
+/**
+ * dm_test_psr_event_is_set_get_event_fails() - Failed power event read reports no event.
+ * @test: KUnit test context.
+ */
+static void dm_test_psr_event_is_set_get_event_fails(struct kunit *test)
+{
+	struct amdgpu_display_manager *dm = dm_kunit_alloc_dm(test);
+	struct dc_stream_state *stream = alloc_test_psr_stream(test);
+
+	dm->power_module = NULL;
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_psr_event_is_set(dm, stream, psr_event_vsync));
+}
+
+/**
+ * dm_test_psr_event_is_set_reports_events() - Only events in mod_power are set.
+ * @test: KUnit test context.
+ */
+static void dm_test_psr_event_is_set_reports_events(struct kunit *test)
+{
+	struct amdgpu_display_manager *dm = dm_kunit_alloc_dm(test);
+	struct dc_stream_state *stream = alloc_test_psr_stream(test);
+	struct psr_caps caps = {0};
+	struct core_power *core_power;
+
+	caps.psr_version = 1;
+	core_power = create_test_power_module(test, stream, &caps);
+	dm->power_module = &core_power->mod_public;
+
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_psr_event_is_set(dm, stream, psr_event_vsync));
+	KUNIT_EXPECT_FALSE(test,
+			   amdgpu_dm_psr_event_is_set(dm, stream, psr_event_hw_programming));
+}
+/* End of tests for amdgpu_dm_psr_event_is_set() */
+
 /* Tests for amdgpu_dm_psr_is_active_allowed() */
 
 /**
@@ -738,6 +794,10 @@ static struct kunit_case dm_psr_test_cases[] = {
 	KUNIT_CASE(dm_test_psr_set_event_get_event_fails),
 	KUNIT_CASE(dm_test_psr_set_event_already_set),
 	KUNIT_CASE(dm_test_psr_set_event_updates_event),
+	/* amdgpu_dm_psr_event_is_set */
+	KUNIT_CASE(dm_test_psr_event_is_set_psr_not_enabled),
+	KUNIT_CASE(dm_test_psr_event_is_set_get_event_fails),
+	KUNIT_CASE(dm_test_psr_event_is_set_reports_events),
 	/* amdgpu_dm_psr_is_active_allowed */
 	KUNIT_CASE(dm_test_psr_is_active_allowed_no_streams),
 	KUNIT_CASE(dm_test_psr_is_active_allowed_null_link),

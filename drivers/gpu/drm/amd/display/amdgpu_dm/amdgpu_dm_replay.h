@@ -40,4 +40,7 @@ bool amdgpu_dm_link_setup_replay(struct dc_stream_state *stream,
 bool amdgpu_dm_replay_set_event(struct amdgpu_display_manager *dm,
 		struct dc_stream_state *stream, bool set_event,
 		enum replay_event event, bool wait_for_disable);
+bool amdgpu_dm_replay_event_is_set(struct amdgpu_display_manager *dm,
+				   struct dc_stream_state *stream,
+				   enum replay_event event);
 #endif /* AMDGPU_DM_AMDGPU_DM_REPLAY_H_ */

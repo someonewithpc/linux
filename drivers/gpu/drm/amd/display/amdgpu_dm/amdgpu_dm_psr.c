@@ -194,6 +194,30 @@ bool amdgpu_dm_psr_set_event(struct amdgpu_display_manager *dm, struct dc_stream
 }
 EXPORT_IF_KUNIT(amdgpu_dm_psr_set_event);
 
+/**
+ * amdgpu_dm_psr_event_is_set() - check whether a PSR event is set for a stream
+ * @dm: pointer to amdgpu_display_manager
+ * @stream: pointer to dc_stream_state
+ * @event: PSR event type
+ *
+ * Return: true if PSR is enabled on @stream and @event is set, false otherwise
+ */
+bool amdgpu_dm_psr_event_is_set(struct amdgpu_display_manager *dm,
+				struct dc_stream_state *stream, enum psr_event event)
+{
+	unsigned int psr_events;
+
+	if (!stream || !stream->link ||
+	    !stream->link->psr_settings.psr_feature_enabled)
+		return false;
+
+	if (!mod_power_get_psr_event(dm->power_module, stream, &psr_events))
+		return false;
+
+	return psr_events & event;
+}
+EXPORT_IF_KUNIT(amdgpu_dm_psr_event_is_set);
+
 #if IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
 /**
  * amdgpu_dm_psr_get_dc_feature_mask() - Get DC feature mask for KUnit tests.
