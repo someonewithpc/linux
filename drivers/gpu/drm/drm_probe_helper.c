@@ -703,11 +703,10 @@ retry:
 	}
 
 exit:
-	drm_modeset_drop_locks(&ctx);
-	drm_modeset_acquire_fini(&ctx);
-
-	if (list_empty(&connector->modes))
-		return 0;
+	if (list_empty(&connector->modes)) {
+		count = 0;
+		goto unlock;
+	}
 
 	drm_mode_sort(&connector->modes);
 
@@ -719,6 +718,10 @@ exit:
 		drm_dbg_kms(dev, "Probed mode: " DRM_MODE_FMT "\n",
 			    DRM_MODE_ARG(mode));
 	}
+
+unlock:
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
 
 	return count;
 }
