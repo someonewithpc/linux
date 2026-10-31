@@ -2097,6 +2097,129 @@ static void dm_test_pwm_lut_monotonic(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, steps, 2000U);
 }
 
+/* Tests for convert_brightness_to_millipercent() */
+
+static void dm_test_restore_dc_debug_mask(void *data)
+{
+	amdgpu_dm_set_dc_debug_mask((uintptr_t)data);
+}
+
+/* Turn the custom curve on, and restore the previous mask when the test ends, even if it aborts */
+static void dm_test_enable_custom_curve(struct kunit *test)
+{
+	uint mask = amdgpu_dm_get_dc_debug_mask();
+
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, dm_test_restore_dc_debug_mask,
+							(void *)(uintptr_t)mask), 0);
+	amdgpu_dm_set_dc_debug_mask(mask & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
+}
+
+/**
+ * dm_test_brightness_to_millipercent_curve - Test Luminance keeps sub-percent precision
+ * @test: The KUnit test context
+ *
+ * With min_input_signal 0, max is 65535 and the signal is brightness * 255
+ * / 65535. Worked out by hand on gv301qh_curve:
+ *
+ * 1024 is signal 3.98, below the first point (14, 2%), so the luminance is
+ * 2000 * 1024 * 255 / (14 * 65535) = 569.2, which rounds to 569 millipercent
+ *
+ * 4096 is signal 15.94, between (14, 2%) and (16, 4%), so the luminance
+ * is 2000 + 2000 * (4096 * 255 - 14 * 65535) / (2 * 65535) = 3937.7, which
+ * rounds to 3938
+ */
+static void dm_test_brightness_to_millipercent_curve(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_pwm_caps(&caps, 0);
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 0), 0U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 1024), 569U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 4096), 3938U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 65535), 100000U);
+}
+
+/**
+ * dm_test_brightness_to_millipercent_no_curve - Test Linear luminance keeps sub-percent precision
+ * @test: The KUnit test context
+ *
+ * Without data points the luminance is linear, 1024 * 100000 / 65535 =
+ * 1562.52, which rounds to 1563 millipercent
+ */
+static void dm_test_brightness_to_millipercent_no_curve(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_pwm_caps(&caps, 0);
+	caps.data_points = 0;
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 1024), 1563U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 65535), 100000U);
+}
+
+/**
+ * dm_test_pwm_brightness_follows_request - Test PWM follows the user brightness
+ * @test: The KUnit test context
+ *
+ * The power module's LUT inverts the curve that turned the brightness into
+ * luminance, so with min_input_signal 0 the PWM must stay within 1 of the
+ * request across the whole range. Before, raw 0 to 4096 gave only PWM 0,
+ * 0x707, 0xe0e, 0xf0f and 0x1010
+ */
+static void dm_test_pwm_brightness_follows_request(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 0);
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int brightness, pwm, prev = 0;
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_pwm_caps(&caps, 0);
+
+	for (brightness = 0; brightness <= 65535; brightness++) {
+		pwm = backlight_millipercent_to_pwm(core_power,
+						    convert_brightness_to_millipercent(&caps,
+										       brightness),
+						    0);
+		KUNIT_ASSERT_GE_MSG(test, pwm, prev, "brightness %u", brightness);
+		KUNIT_ASSERT_LE_MSG(test, abs((int)pwm - (int)brightness), 1,
+				    "brightness %u", brightness);
+		prev = pwm;
+	}
+}
+
+/**
+ * dm_test_pwm_brightness_monotonic_with_minimum - Test PWM with the firmware minimum
+ * @test: The KUnit test context
+ *
+ * With min_input_signal 12 the PWM must still never go down as the request
+ * goes up, and must stay between the LUT floor 0xc0c and 0xffff
+ */
+static void dm_test_pwm_brightness_monotonic_with_minimum(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 12);
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int brightness, pwm, prev = 0;
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_pwm_caps(&caps, 12);
+
+	for (brightness = 0; brightness <= 65535; brightness++) {
+		pwm = backlight_millipercent_to_pwm(core_power,
+						    convert_brightness_to_millipercent(&caps,
+										       brightness),
+						    0);
+		KUNIT_ASSERT_GE_MSG(test, pwm, prev, "brightness %u", brightness);
+		KUNIT_ASSERT_GE(test, pwm, 0xc0cU);
+		KUNIT_ASSERT_LE(test, pwm, 0xffffU);
+		prev = pwm;
+	}
+
+	KUNIT_EXPECT_EQ(test, prev, 0xffffU);
+}
+
 static struct kunit_case dm_backlight_test_cases[] = {
 	/* dm_find_stream_with_link */
 	KUNIT_CASE(dm_test_find_stream_with_link_returns_match),
@@ -2189,6 +2312,11 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_pwm_lut_between_percents),
 	KUNIT_CASE(dm_test_pwm_lut_readback),
 	KUNIT_CASE(dm_test_pwm_lut_monotonic),
+	/* convert_brightness_to_millipercent */
+	KUNIT_CASE(dm_test_brightness_to_millipercent_curve),
+	KUNIT_CASE(dm_test_brightness_to_millipercent_no_curve),
+	KUNIT_CASE(dm_test_pwm_brightness_follows_request),
+	KUNIT_CASE(dm_test_pwm_brightness_monotonic_with_minimum),
 	{}
 };
 

@@ -176,8 +176,9 @@ static u32 backlight_signal_to_millipercent(const struct amdgpu_dm_backlight_cap
 				     (upper_signal - lower_signal) * max);
 }
 
-static u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_caps *caps,
-					      u32 user_brightness)
+STATIC_IFN_KUNIT
+u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_caps *caps,
+				       u32 user_brightness)
 {
 	unsigned int min, max;
 	u32 millipercent;
@@ -196,6 +197,7 @@ static u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_c
 
 	return min_t(u32, millipercent, 100000);
 }
+EXPORT_IF_KUNIT(convert_brightness_to_millipercent);
 
 STATIC_IFN_KUNIT
 void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
