@@ -49,11 +49,14 @@ transition notifiers.
 2.1 CPUFreq policy notifiers
 ----------------------------
 
-These are notified when a new policy is created or removed.
+These are notified when a new policy is created or removed, and when boost
+is turned on or off or the driver reports a change of cpuinfo.max_freq.
 
 The phase is specified in the second argument to the notifier.  The phase is
-CPUFREQ_CREATE_POLICY when the policy is first created and it is
-CPUFREQ_REMOVE_POLICY when the policy is removed.
+CPUFREQ_CREATE_POLICY when the policy is first created, it is
+CPUFREQ_REMOVE_POLICY when the policy is removed and it is
+CPUFREQ_UPDATE_CPUINFO when boost has been turned on or off or the driver
+reports that cpuinfo.max_freq has changed.
 
 The third argument, a ``void *pointer``, points to a struct cpufreq_policy
 consisting of several values, including min, max (the lower and upper

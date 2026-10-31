@@ -594,6 +594,8 @@ static int policy_set_boost(struct cpufreq_policy *policy, bool enable)
 		return ret;
 	}
 
+	cpufreq_notify_cpuinfo_update(policy);
+
 	return 0;
 }
 
@@ -1183,6 +1185,20 @@ void refresh_frequency_limits(struct cpufreq_policy *policy)
 	}
 }
 EXPORT_SYMBOL(refresh_frequency_limits);
+
+/**
+ * cpufreq_notify_cpuinfo_update - Notify policy notifiers of a cpuinfo change
+ * @policy: Policy whose cpuinfo limits have changed
+ *
+ * Send CPUFREQ_UPDATE_CPUINFO to the policy notifiers, so that QoS requests
+ * derived from @policy->cpuinfo can be recomputed. An inactive policy is
+ * notified too, since its QoS requests stay until CPUFREQ_REMOVE_POLICY
+ */
+void cpufreq_notify_cpuinfo_update(struct cpufreq_policy *policy)
+{
+	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,
+				     CPUFREQ_UPDATE_CPUINFO, policy);
+}
 
 static void handle_update(struct work_struct *work)
 {
