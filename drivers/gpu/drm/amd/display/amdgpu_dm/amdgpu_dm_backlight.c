@@ -41,6 +41,8 @@
 #include <linux/backlight.h>
 #include <linux/minmax.h>
 #include <linux/power_supply.h>
+#include <drm/drm_atomic.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_utils.h>
 
@@ -682,6 +684,21 @@ EXPORT_IF_KUNIT(amdgpu_dm_setup_backlight_device);
  *
  * Modifying this value can have implications on color accuracy, so tread
  * carefully.
+ *
+ * If the connector drives an active CRTC, a write commits the new level
+ * before it returns, without a modeset. The commit waits for any commit
+ * already pending on that CRTC. If the connector is off, the driver stores
+ * the level and applies it when the connector is next enabled
+ *
+ * If the commit fails, the driver still stores the level and sends a hotplug
+ * uevent with CONNECTOR set to the connector's object ID. The level then takes
+ * effect on the next atomic commit that includes the connector, and userspace
+ * that receives the uevent is expected to make one. Adding the connector to
+ * the commit is enough. No property needs to change and the commit does not
+ * need DRM_MODE_ATOMIC_ALLOW_MODESET
+ *
+ * Writes fail with -EBUSY once the DRM master has set the connector's
+ * 'adaptive backlight modulation' property to a value other than 'sysfs'
  */
 
 STATIC_IFN_KUNIT
@@ -703,13 +720,102 @@ ssize_t panel_power_savings_show(struct device *device,
 }
 EXPORT_IF_KUNIT(panel_power_savings_show);
 
+/*
+ * The level goes into the current connector state before it is duplicated, so
+ * the old and new connector states agree and atomic check does not flag a
+ * connector change, which would need a modeset. Only the CRTC's copy of the
+ * level differs, and the commit tail sends that as a stream update
+ */
+static int panel_power_savings_apply(struct drm_connector *connector,
+				     unsigned int level)
+{
+	unsigned int abm_level = level ?: ABM_LEVEL_IMMEDIATE_DISABLE;
+	struct drm_device *dev = connector->dev;
+	struct drm_atomic_commit *state = NULL;
+	struct drm_connector_state *conn_state;
+	struct drm_crtc_state *crtc_state;
+	struct drm_modeset_acquire_ctx ctx;
+	bool forbidden = false;
+	int ret, idx;
+
+	/* Keep the commit off hardware that is being unplugged */
+	if (!drm_dev_enter(dev, &idx))
+		return -ENODEV;
+
+	drm_modeset_acquire_init(&ctx, 0);
+retry:
+	ret = drm_modeset_lock(&dev->mode_config.connection_mutex, &ctx);
+	if (ret)
+		goto out;
+
+	if (to_dm_connector_state(connector->state)->abm_sysfs_forbidden) {
+		forbidden = true;
+		goto out;
+	}
+
+	to_dm_connector_state(connector->state)->abm_level = abm_level;
+
+	if (!connector->state->crtc)
+		goto out;
+
+	if (!state) {
+		state = drm_atomic_commit_alloc(dev);
+		if (!state) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		state->acquire_ctx = &ctx;
+		state->allow_modeset = false;
+	}
+
+	conn_state = drm_atomic_get_connector_state(state, connector);
+	if (IS_ERR(conn_state)) {
+		ret = PTR_ERR(conn_state);
+		goto out;
+	}
+
+	crtc_state = drm_atomic_get_crtc_state(state, conn_state->crtc);
+	if (IS_ERR(crtc_state)) {
+		ret = PTR_ERR(crtc_state);
+		goto out;
+	}
+
+	if (crtc_state->active)
+		ret = drm_atomic_commit(state);
+
+out:
+	if (ret == -EDEADLK) {
+		if (state)
+			drm_atomic_commit_clear(state);
+		drm_modeset_backoff(&ctx);
+		goto retry;
+	}
+
+	if (state)
+		drm_atomic_commit_put(state);
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
+	drm_dev_exit(idx);
+
+	if (forbidden)
+		return -EBUSY;
+
+	/* The level stays stored, so ask userspace for a commit that applies it */
+	if (ret) {
+		drm_dbg_kms(dev, "[CONNECTOR:%d:%s] Failed to commit ABM level %u: %d\n",
+			    connector->base.id, connector->name, level, ret);
+		drm_kms_helper_connector_hotplug_event(connector);
+	}
+
+	return 0;
+}
+
 STATIC_IFN_KUNIT
 ssize_t panel_power_savings_store(struct device *device,
 				 struct device_attribute *attr,
 				 const char *buf, size_t count)
 {
 	struct drm_connector *connector = dev_get_drvdata(device);
-	struct drm_device *dev = connector->dev;
 	long val;
 	int ret;
 
@@ -721,18 +827,9 @@ ssize_t panel_power_savings_store(struct device *device,
 	if (val < 0 || val > 4)
 		return -EINVAL;
 
-	drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
-	if (to_dm_connector_state(connector->state)->abm_sysfs_forbidden)
-		ret = -EBUSY;
-	else
-		to_dm_connector_state(connector->state)->abm_level = val ?:
-			ABM_LEVEL_IMMEDIATE_DISABLE;
-	drm_modeset_unlock(&dev->mode_config.connection_mutex);
-
+	ret = panel_power_savings_apply(connector, val);
 	if (ret)
 		return ret;
-
-	drm_kms_helper_connector_hotplug_event(connector);
 
 	return count;
 }
