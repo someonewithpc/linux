@@ -10,6 +10,7 @@
 #include <drm/drm_edid.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_kunit_helpers.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_probe_helper.h>
@@ -195,7 +196,113 @@ static struct kunit_suite drm_test_pick_cmdline_test_suite = {
 	.test_cases = drm_test_pick_cmdline_tests
 };
 
-kunit_test_suite(drm_test_pick_cmdline_test_suite);
+static int drm_client_target_cloned_add_dmt_mode(struct drm_connector *connector,
+						 int hsize, int vsize)
+{
+	struct drm_display_mode *mode;
+
+	mode = drm_mode_find_dmt(connector->dev, hsize, vsize, 60, false);
+	if (!mode)
+		return 0;
+
+	drm_mode_probed_add(connector, mode);
+
+	return 1;
+}
+
+static int drm_client_target_cloned_get_modes_1080p(struct drm_connector *connector)
+{
+	return drm_client_target_cloned_add_dmt_mode(connector, 1920, 1080);
+}
+
+static int drm_client_target_cloned_get_modes_xga(struct drm_connector *connector)
+{
+	return drm_client_target_cloned_add_dmt_mode(connector, 1024, 768);
+}
+
+static const struct drm_connector_helper_funcs drm_client_target_cloned_1080p_helper_funcs = {
+	.get_modes = drm_client_target_cloned_get_modes_1080p,
+};
+
+static const struct drm_connector_helper_funcs drm_client_target_cloned_xga_helper_funcs = {
+	.get_modes = drm_client_target_cloned_get_modes_xga,
+};
+
+/*
+ * Only the first connector has a video= mode, so the cmdline pass stops
+ * at the second one. The first connector has no 1024x768 mode, so the
+ * 1024x768 pass must not report the two connectors as clonable
+ */
+static void drm_test_target_cloned_cmdline_on_one_connector(struct kunit *test)
+{
+	struct drm_connector *connectors[2];
+	const struct drm_display_mode *modes[ARRAY_SIZE(connectors)] = {};
+	struct drm_client_offset offsets[ARRAY_SIZE(connectors)] = {};
+	bool enabled[ARRAY_SIZE(connectors)] = { true, true };
+	struct drm_device *drm;
+	struct device *dev;
+	bool cloned;
+	int i, ret;
+
+	dev = drm_kunit_helper_alloc_device(test);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+
+	drm = __drm_kunit_helper_alloc_drm_device(test, dev, sizeof(*drm), 0,
+						  DRIVER_MODESET);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, drm);
+
+	for (i = 0; i < ARRAY_SIZE(connectors); i++) {
+		connectors[i] = drmm_kzalloc(drm, sizeof(*connectors[i]), GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, connectors[i]);
+
+		ret = drmm_connector_init(drm, connectors[i],
+					  &drm_client_modeset_connector_funcs,
+					  DRM_MODE_CONNECTOR_Unknown, NULL);
+		KUNIT_ASSERT_EQ(test, ret, 0);
+
+		/* Drop any video= option the kernel was booted with */
+		memset(&connectors[i]->cmdline_mode, 0,
+		       sizeof(connectors[i]->cmdline_mode));
+		connectors[i]->force = DRM_FORCE_UNSPECIFIED;
+	}
+
+	drm_connector_helper_add(connectors[0],
+				 &drm_client_target_cloned_1080p_helper_funcs);
+	drm_connector_helper_add(connectors[1],
+				 &drm_client_target_cloned_xga_helper_funcs);
+
+	KUNIT_ASSERT_TRUE(test,
+			  drm_mode_parse_command_line_for_connector("1920x1080@60",
+								    connectors[0],
+								    &connectors[0]->cmdline_mode));
+
+	mutex_lock(&drm->mode_config.mutex);
+	for (i = 0; i < ARRAY_SIZE(connectors); i++) {
+		ret = drm_helper_probe_single_connector_modes(connectors[i],
+							      1920, 1080);
+		KUNIT_EXPECT_EQ(test, ret, 1);
+	}
+	cloned = drm_client_target_cloned(drm, connectors, ARRAY_SIZE(connectors),
+					  modes, offsets, enabled, 1920, 1080);
+	mutex_unlock(&drm->mode_config.mutex);
+
+	KUNIT_EXPECT_FALSE(test, cloned);
+
+	modes_destroy(drm, modes, ARRAY_SIZE(connectors));
+}
+
+static struct kunit_case drm_test_target_cloned_tests[] = {
+	KUNIT_CASE(drm_test_target_cloned_cmdline_on_one_connector),
+	{}
+};
+
+static struct kunit_suite drm_test_target_cloned_test_suite = {
+	.name = "drm_test_target_cloned",
+	.test_cases = drm_test_target_cloned_tests
+};
+
+kunit_test_suites(&drm_test_pick_cmdline_test_suite,
+		  &drm_test_target_cloned_test_suite);
 
 /*
  * This file is included directly by drm_client_modeset.c so we can't
