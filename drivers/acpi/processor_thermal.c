@@ -97,8 +97,16 @@ static bool cpufreq_update_thermal_limit(unsigned int cpu, struct acpi_processor
 	if (!policy)
 		return false;
 
-	max_freq = (policy->cpuinfo.max_freq *
-		(100 - reduction_step(cpu) * cpufreq_thermal_reduction_pctg)) / 100;
+	/*
+	 * Step 0 is no limit. cpuinfo.max_freq drops to the nominal frequency
+	 * while boost is off, and a cap computed from it then would stay after
+	 * boost comes back on.
+	 */
+	if (!reduction_step(cpu))
+		max_freq = FREQ_QOS_MAX_DEFAULT_VALUE;
+	else
+		max_freq = (policy->cpuinfo.max_freq *
+			(100 - reduction_step(cpu) * cpufreq_thermal_reduction_pctg)) / 100;
 
 	ret = freq_qos_update_request(&pr->thermal_req, max_freq);
 	if (ret < 0) {
