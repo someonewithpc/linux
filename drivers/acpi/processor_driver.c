@@ -221,6 +221,8 @@ static int acpi_processor_notifier(struct notifier_block *nb,
 	} else if (event == CPUFREQ_REMOVE_POLICY) {
 		acpi_processor_ppc_exit(policy);
 		acpi_thermal_cpufreq_exit(policy);
+	} else if (event == CPUFREQ_UPDATE_CPUINFO) {
+		acpi_thermal_cpufreq_update(policy);
 	}
 
 	return 0;

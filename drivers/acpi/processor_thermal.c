@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/cpufreq.h>
 #include <linux/acpi.h>
+#include <linux/mutex.h>
 #include <acpi/processor.h>
 #include <linux/uaccess.h>
 
@@ -40,6 +41,16 @@ static int cpufreq_thermal_max_step __read_mostly = 3;
 static int cpufreq_thermal_reduction_pctg __read_mostly = 20;
 
 static DEFINE_PER_CPU(unsigned int, cpufreq_thermal_reduction_step);
+/* The step each CPU's thermal_req was last set to */
+static DEFINE_PER_CPU(unsigned int, cpufreq_thermal_req_step);
+
+/*
+ * Serializes adding, updating and removing thermal_req, and the step saved
+ * with it, so recomputing the cap after a boost change can't race a cooling
+ * state write. It nests inside policy->rwsem and the cooling device lock,
+ * so take neither while holding it
+ */
+static DEFINE_MUTEX(cpufreq_thermal_lock);
 
 #define reduction_step(cpu) \
 	per_cpu(cpufreq_thermal_reduction_step, phys_package_first_cpu(cpu))
@@ -95,6 +106,8 @@ static void cpufreq_update_thermal_req(struct cpufreq_policy *policy,
 	unsigned long max_freq;
 	int ret;
 
+	lockdep_assert_held(&cpufreq_thermal_lock);
+
 	max_freq = (policy->cpuinfo.max_freq *
 		(100 - step * cpufreq_thermal_reduction_pctg)) / 100;
 
@@ -102,7 +115,10 @@ static void cpufreq_update_thermal_req(struct cpufreq_policy *policy,
 	if (ret < 0) {
 		pr_warn("Failed to update thermal freq constraint: CPU%d (%d)\n",
 			pr->id, ret);
+		return;
 	}
+
+	per_cpu(cpufreq_thermal_req_step, pr->id) = step;
 }
 
 static bool cpufreq_update_thermal_limit(unsigned int cpu, struct acpi_processor *pr)
@@ -123,6 +139,8 @@ static int cpufreq_set_cur_state(unsigned int cpu, int state)
 
 	if (!cpu_has_cpufreq(cpu))
 		return 0;
+
+	guard(mutex)(&cpufreq_thermal_lock);
 
 	reduction_step(cpu) = state;
 
@@ -177,9 +195,13 @@ void acpi_thermal_cpufreq_init(struct cpufreq_policy *policy)
 		if (!pr)
 			continue;
 
-		ret = freq_qos_add_request(&policy->constraints,
-					   &pr->thermal_req,
-					   FREQ_QOS_MAX, INT_MAX);
+		scoped_guard(mutex, &cpufreq_thermal_lock) {
+			ret = freq_qos_add_request(&policy->constraints,
+						   &pr->thermal_req,
+						   FREQ_QOS_MAX, INT_MAX);
+			if (ret >= 0)
+				per_cpu(cpufreq_thermal_req_step, cpu) = 0;
+		}
 		if (ret < 0) {
 			pr_err("Failed to add freq constraint for CPU%d (%d)\n",
 			       cpu, ret);
@@ -187,6 +209,23 @@ void acpi_thermal_cpufreq_init(struct cpufreq_policy *policy)
 		}
 
 		thermal_cooling_device_update(pr->cdev);
+	}
+}
+
+void acpi_thermal_cpufreq_update(struct cpufreq_policy *policy)
+{
+	unsigned int cpu;
+
+	guard(mutex)(&cpufreq_thermal_lock);
+
+	for_each_cpu(cpu, policy->related_cpus) {
+		struct acpi_processor *pr = per_cpu(processors, cpu);
+
+		if (!pr || !freq_qos_request_active(&pr->thermal_req))
+			continue;
+
+		cpufreq_update_thermal_req(policy, pr,
+					   per_cpu(cpufreq_thermal_req_step, cpu));
 	}
 }
 
@@ -200,7 +239,8 @@ void acpi_thermal_cpufreq_exit(struct cpufreq_policy *policy)
 		if (!pr)
 			continue;
 
-		freq_qos_remove_request(&pr->thermal_req);
+		scoped_guard(mutex, &cpufreq_thermal_lock)
+			freq_qos_remove_request(&pr->thermal_req);
 
 		thermal_cooling_device_update(pr->cdev);
 	}
