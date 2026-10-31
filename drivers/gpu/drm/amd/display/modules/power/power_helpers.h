@@ -201,6 +201,10 @@ void mod_power_set_backlight_control_type(struct core_power *core_power,
 		unsigned int inst, enum backlight_control_type backlight_control_type);
 unsigned int backlight_millipercent_to_pwm(
 		struct core_power *core_power, unsigned int millipercent, unsigned int inst);
+#if IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
+unsigned int backlight_pwm_to_millipercent(
+		struct core_power *core_power, unsigned int pwm, unsigned int inst);
+#endif
 unsigned int backlight_millipercent_to_millinit(
 		struct core_power *core_power, unsigned int millipercent, unsigned int inst);
 void fill_backlight_level_params(struct core_power *core_power,
