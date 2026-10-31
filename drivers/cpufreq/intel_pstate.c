@@ -1429,13 +1429,19 @@ static void intel_pstate_update_policies(void)
 static void __intel_pstate_update_max_freq(struct cpufreq_policy *policy,
 					   struct cpudata *cpudata)
 {
+	unsigned int max_freq;
+
 	guard(cpufreq_policy_write)(policy);
 
 	if (hwp_active)
 		intel_pstate_get_hwp_cap(cpudata);
 
-	policy->cpuinfo.max_freq = READ_ONCE(global.no_turbo) ?
-			cpudata->pstate.max_freq : cpudata->pstate.turbo_freq;
+	max_freq = READ_ONCE(global.no_turbo) ?
+		   cpudata->pstate.max_freq : cpudata->pstate.turbo_freq;
+	if (policy->cpuinfo.max_freq != max_freq) {
+		policy->cpuinfo.max_freq = max_freq;
+		cpufreq_notify_cpuinfo_update(policy);
+	}
 
 	refresh_frequency_limits(policy);
 }
