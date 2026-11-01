@@ -482,7 +482,7 @@ static void dm_test_register_backlight_device_success(struct kunit *test)
 	struct amdgpu_dm_backlight_caps *caps;
 	struct dc_link *link = dm_kunit_alloc_link(test);
 	struct drm_minor *primary;
-	unsigned int max;
+	unsigned int user_max;
 
 	setup_test_link_service(test, link);
 	link->dc->link_srv->edp_get_backlight_level = dm_test_get_backlight_level_error;
@@ -499,14 +499,14 @@ static void dm_test_register_backlight_device_success(struct kunit *test)
 	caps->max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 	caps->ac_level = 50;
 	caps->dc_level = 25;
-	max = 0x101 * AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
+	user_max = 0x101 * AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
 	amdgpu_dm_register_backlight_device(aconnector);
 
 	KUNIT_ASSERT_NOT_NULL(test, adev->dm.backlight_dev[0]);
-	KUNIT_EXPECT_EQ(test, adev->dm.backlight_dev[0]->props.max_brightness, max);
+	KUNIT_EXPECT_EQ(test, adev->dm.backlight_dev[0]->props.max_brightness, user_max);
 	KUNIT_EXPECT_EQ(test, adev->dm.backlight_dev[0]->props.brightness,
-			DIV_ROUND_CLOSEST(max * caps->ac_level, 100));
+			DIV_ROUND_CLOSEST(user_max * caps->ac_level, 100));
 	KUNIT_EXPECT_EQ(test, adev->dm.brightness[0],
 			adev->dm.backlight_dev[0]->props.brightness);
 	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
@@ -821,12 +821,12 @@ static void dm_test_validate_backlight_caps(struct kunit *test)
  */
 static void dm_test_brightness_range_null_caps(struct kunit *test)
 {
-	unsigned int min = 99, max = 99;
+	unsigned int user_min = 99, user_max = 99;
 
-	KUNIT_EXPECT_EQ(test, get_brightness_range(NULL, &min, &max), 0);
-	/* min/max should remain untouched */
-	KUNIT_EXPECT_EQ(test, min, 99U);
-	KUNIT_EXPECT_EQ(test, max, 99U);
+	KUNIT_EXPECT_EQ(test, get_brightness_range(NULL, &user_min, &user_max), 0);
+	/* user_min/user_max should remain untouched */
+	KUNIT_EXPECT_EQ(test, user_min, 99U);
+	KUNIT_EXPECT_EQ(test, user_max, 99U);
 }
 
 /**
@@ -836,16 +836,16 @@ static void dm_test_brightness_range_null_caps(struct kunit *test)
 static void dm_test_brightness_range_pwm(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
-	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 1);
+	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &user_min, &user_max), 1);
 	/* 0x101 * AMDGPU_DM_DEFAULT_MIN_BACKLIGHT, 0x101 * AMDGPU_DM_DEFAULT_MAX_BACKLIGHT */
-	KUNIT_EXPECT_EQ(test, min, 0x101U * AMDGPU_DM_DEFAULT_MIN_BACKLIGHT);
-	KUNIT_EXPECT_EQ(test, max, 0x101U * AMDGPU_DM_DEFAULT_MAX_BACKLIGHT);
+	KUNIT_EXPECT_EQ(test, user_min, 0x101U * AMDGPU_DM_DEFAULT_MIN_BACKLIGHT);
+	KUNIT_EXPECT_EQ(test, user_max, 0x101U * AMDGPU_DM_DEFAULT_MAX_BACKLIGHT);
 }
 
 /**
@@ -855,16 +855,16 @@ static void dm_test_brightness_range_pwm(struct kunit *test)
 static void dm_test_brightness_range_aux(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = true;
 	caps.aux_min_input_signal = 1;
 	caps.aux_max_input_signal = 512;
 
-	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 1);
+	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &user_min, &user_max), 1);
 	/* millinits: 1000 * value */
-	KUNIT_EXPECT_EQ(test, min, 1000U);
-	KUNIT_EXPECT_EQ(test, max, 512000U);
+	KUNIT_EXPECT_EQ(test, user_min, 1000U);
+	KUNIT_EXPECT_EQ(test, user_max, 512000U);
 }
 
 /* Tests for convert_brightness_to_user() */
@@ -878,7 +878,7 @@ static void dm_test_brightness_to_user_null_caps(struct kunit *test)
 	/*
 	 * With NULL caps, get_brightness_range fails → passthrough.
 	 * We simulate this by passing a zeroed caps struct where
-	 * max_input_signal=0 makes max=0 and the function hits
+	 * max_input_signal=0 makes user_max=0 and the function hits
 	 * get_brightness_range returning 0 since caps is NULL.
 	 */
 	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(NULL, 42), 42U);
@@ -896,7 +896,7 @@ static void dm_test_brightness_to_user_below_min(struct kunit *test)
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
-	/* brightness < min (0x101*AMDGPU_DM_DEFAULT_MIN_BACKLIGHT), should return 0 */
+	/* brightness < user_min (0x101*AMDGPU_DM_DEFAULT_MIN_BACKLIGHT), should return 0 */
 	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, 100), 0U);
 }
 
@@ -907,16 +907,16 @@ static void dm_test_brightness_to_user_below_min(struct kunit *test)
 static void dm_test_brightness_to_user_at_max(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	/* At max → should return max */
-	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, max), max);
+	/* At user_max → should return user_max */
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, user_max), user_max);
 }
 
 /**
@@ -926,16 +926,16 @@ static void dm_test_brightness_to_user_at_max(struct kunit *test)
 static void dm_test_brightness_to_user_at_min(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	/* At min → should return 0 */
-	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, min), 0U);
+	/* At user_min → should return 0 */
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, user_min), 0U);
 }
 
 /**
@@ -945,19 +945,19 @@ static void dm_test_brightness_to_user_at_min(struct kunit *test)
 static void dm_test_brightness_to_user_midpoint_pwm(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max, mid_hw, result;
+	unsigned int user_min, user_max, mid_hw, result;
 	u64 expected;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/* midpoint of hw range */
-	mid_hw = min + (max - min) / 2;
-	/* expected = DIV_ROUND_CLOSEST_ULL((u64)max * (mid_hw - min), max - min) */
-	expected = DIV_ROUND_CLOSEST_ULL((u64)max * (mid_hw - min), max - min);
+	mid_hw = user_min + (user_max - user_min) / 2;
+	/* DIV_ROUND_CLOSEST_ULL((u64)user_max * (mid_hw - user_min), user_max - user_min) */
+	expected = DIV_ROUND_CLOSEST_ULL((u64)user_max * (mid_hw - user_min), user_max - user_min);
 	result = convert_brightness_to_user(&caps, mid_hw);
 
 	KUNIT_EXPECT_EQ(test, result, (u32)expected);
@@ -981,7 +981,7 @@ static void dm_test_brightness_from_user_null_caps(struct kunit *test)
 static void dm_test_brightness_from_user_zero(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
@@ -989,10 +989,10 @@ static void dm_test_brightness_from_user_zero(struct kunit *test)
 	/* no custom curve */
 	caps.data_points = 0;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	/* brightness=0 → min + 0 = min */
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)min);
+	/* brightness=0 → user_min + 0 = user_min */
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)user_min);
 }
 
 /**
@@ -1002,20 +1002,21 @@ static void dm_test_brightness_from_user_zero(struct kunit *test)
 static void dm_test_brightness_from_user_max(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 	caps.data_points = 0;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
-	 * brightness=max → min + DIV_ROUND_CLOSEST((max-min)*max, max)
-	 *               = min + (max - min) = max
+	 * brightness=user_max →
+	 *   user_min + DIV_ROUND_CLOSEST((user_max-user_min)*user_max, user_max)
+	 *   = user_min + (user_max - user_min) = user_max
 	 */
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, max), (u32)max);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, user_max), (u32)user_max);
 }
 
 /**
@@ -1025,19 +1026,19 @@ static void dm_test_brightness_from_user_max(struct kunit *test)
 static void dm_test_brightness_from_user_aux(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.aux_support = true;
 	caps.aux_min_input_signal = 1;
 	caps.aux_max_input_signal = 512;
 	caps.data_points = 0;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	/* brightness=0 → min */
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)min);
-	/* brightness=max → max */
-	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, max), (u32)max);
+	/* brightness=0 → user_min */
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)user_min);
+	/* brightness=user_max → user_max */
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, user_max), (u32)user_max);
 }
 
 /* Tests for convert_custom_brightness() */
@@ -1094,7 +1095,7 @@ static void dm_test_custom_brightness_exact_match(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
 	uint32_t brightness;
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
@@ -1110,22 +1111,23 @@ static void dm_test_custom_brightness_exact_match(struct kunit *test)
 	caps.luminance_data[2].input_signal = 200;
 	caps.luminance_data[2].luminance = 90;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
 	 * Set brightness so that scale_input_to_fw yields exactly 128.
-	 * scale_input_to_fw(min, max, x) = DIV_ROUND_CLOSEST(x * 255, max - min)
-	 * With min=0, max=0x101*255=65535:
+	 * scale_input_to_fw(user_min, user_max, x) =
+	 *   DIV_ROUND_CLOSEST(x * 255, user_max - user_min)
+	 * With user_min=0, user_max=0x101*255=65535:
 	 * We need x such that DIV_ROUND_CLOSEST(x * 255, 65535) = 128
 	 * → x = 128 * 65535 / 255 = 32896
 	 */
 	brightness = 32896;
 
-	convert_custom_brightness(&caps, max, &brightness);
+	convert_custom_brightness(&caps, user_max, &brightness);
 
 	/*
 	 * Exact match: lum=50, brightness_scaled=128
-	 * result = scale_fw_to_input(max, DIV_ROUND_CLOSEST(50*128, 101))
+	 * result = scale_fw_to_input(user_max, DIV_ROUND_CLOSEST(50*128, 101))
 	 *        = scale_fw_to_input(65535, DIV_ROUND_CLOSEST(6400, 101))
 	 *        = scale_fw_to_input(65535, 63)
 	 *        = DIV_ROUND_CLOSEST(63 * 65535, 255) = 16191 (approx)
@@ -1144,7 +1146,7 @@ static void dm_test_custom_brightness_below_first(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
 	uint32_t brightness;
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
@@ -1158,7 +1160,7 @@ static void dm_test_custom_brightness_below_first(struct kunit *test)
 	caps.luminance_data[1].input_signal = 200;
 	caps.luminance_data[1].luminance = 80;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
 	 * Set brightness low enough that scaled value < 100.
@@ -1167,7 +1169,7 @@ static void dm_test_custom_brightness_below_first(struct kunit *test)
 	 */
 	brightness = 12850;
 
-	convert_custom_brightness(&caps, max, &brightness);
+	convert_custom_brightness(&caps, user_max, &brightness);
 
 	/*
 	 * Below first data point: lum = DIV_ROUND_CLOSEST(40 * 50, 100) = 20
@@ -1189,7 +1191,7 @@ static void dm_test_custom_brightness_interpolation(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
 	uint32_t brightness;
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
@@ -1203,7 +1205,7 @@ static void dm_test_custom_brightness_interpolation(struct kunit *test)
 	caps.luminance_data[1].input_signal = 200;
 	caps.luminance_data[1].luminance = 80;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
 	 * Choose a value between data points 50 and 200.
@@ -1211,7 +1213,7 @@ static void dm_test_custom_brightness_interpolation(struct kunit *test)
 	 */
 	brightness = 32125;
 
-	convert_custom_brightness(&caps, max, &brightness);
+	convert_custom_brightness(&caps, user_max, &brightness);
 
 	/*
 	 * The function should interpolate between data points and produce
@@ -1230,7 +1232,7 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
 	uint32_t brightness;
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
@@ -1244,7 +1246,7 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 	caps.luminance_data[1].input_signal = 150;
 	caps.luminance_data[1].luminance = 60;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
 	 * Choose brightness above the last data point (150).
@@ -1254,7 +1256,7 @@ static void dm_test_custom_brightness_above_last(struct kunit *test)
 	 */
 	brightness = 56533;
 
-	convert_custom_brightness(&caps, max, &brightness);
+	convert_custom_brightness(&caps, user_max, &brightness);
 
 	/* Output should differ from input (remapped via curve) */
 	KUNIT_EXPECT_TRUE(test, brightness != 56533);
@@ -1271,7 +1273,7 @@ static void dm_test_custom_brightness_single_data_point(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
 	uint32_t brightness;
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
@@ -1283,7 +1285,7 @@ static void dm_test_custom_brightness_single_data_point(struct kunit *test)
 	caps.luminance_data[0].input_signal = 128;
 	caps.luminance_data[0].luminance = 50;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
 	 * Brightness below the single data point triggers the
@@ -1292,7 +1294,7 @@ static void dm_test_custom_brightness_single_data_point(struct kunit *test)
 	 */
 	brightness = 16448;
 
-	convert_custom_brightness(&caps, max, &brightness);
+	convert_custom_brightness(&caps, user_max, &brightness);
 
 	KUNIT_EXPECT_TRUE(test, brightness < 16448);
 
@@ -1307,7 +1309,7 @@ static void dm_test_custom_brightness_lower_lum_zero(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
 	uint32_t brightness;
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() & ~DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
@@ -1321,7 +1323,7 @@ static void dm_test_custom_brightness_lower_lum_zero(struct kunit *test)
 	caps.luminance_data[1].input_signal = 200;
 	caps.luminance_data[1].luminance = 80;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
 	/*
 	 * Choose brightness between data points to trigger interpolation.
@@ -1330,7 +1332,7 @@ static void dm_test_custom_brightness_lower_lum_zero(struct kunit *test)
 	 */
 	brightness = 32125;
 
-	convert_custom_brightness(&caps, max, &brightness);
+	convert_custom_brightness(&caps, user_max, &brightness);
 
 	/* Should remap; result should differ from input */
 	KUNIT_EXPECT_TRUE(test, brightness != 32125);
@@ -1345,18 +1347,18 @@ static void dm_test_custom_brightness_lower_lum_zero(struct kunit *test)
 static void dm_test_brightness_to_user_above_max(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max, result;
+	unsigned int user_min, user_max, result;
 
 	caps.aux_support = false;
 	caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT;
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	/* brightness above max → result > max (linear extrapolation) */
-	result = convert_brightness_to_user(&caps, max + 1000);
+	/* brightness above user_max → result > user_max (linear extrapolation) */
+	result = convert_brightness_to_user(&caps, user_max + 1000);
 
-	KUNIT_EXPECT_GT(test, result, max);
+	KUNIT_EXPECT_GT(test, result, user_max);
 }
 
 /**
@@ -1366,7 +1368,7 @@ static void dm_test_brightness_to_user_above_max(struct kunit *test)
 static void dm_test_brightness_from_user_midrange(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	u32 result;
 
 	caps.aux_support = false;
@@ -1374,13 +1376,13 @@ static void dm_test_brightness_from_user_midrange(struct kunit *test)
 	caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT;
 	caps.data_points = 0;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	/* Mid-range brightness should map to between min and max */
-	result = convert_brightness_from_user(&caps, max / 2);
+	/* Mid-range brightness should map to between user_min and user_max */
+	result = convert_brightness_from_user(&caps, user_max / 2);
 
-	KUNIT_EXPECT_GE(test, result, min);
-	KUNIT_EXPECT_LE(test, result, max);
+	KUNIT_EXPECT_GE(test, result, user_min);
+	KUNIT_EXPECT_LE(test, result, user_max);
 }
 
 /**
@@ -1429,7 +1431,7 @@ static void dm_test_brightness_from_user_curve_min(struct kunit *test)
 static void dm_test_brightness_from_user_with_curve(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	u32 with_curve, without_curve;
 	uint saved_mask = amdgpu_dm_get_dc_debug_mask();
 
@@ -1444,13 +1446,13 @@ static void dm_test_brightness_from_user_with_curve(struct kunit *test)
 	caps.luminance_data[1].input_signal = 200;
 	caps.luminance_data[1].luminance = 80;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 
-	with_curve = convert_brightness_from_user(&caps, max / 2);
+	with_curve = convert_brightness_from_user(&caps, user_max / 2);
 
 	/* Now disable the curve and compare */
 	amdgpu_dm_set_dc_debug_mask(amdgpu_dm_get_dc_debug_mask() | DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE);
-	without_curve = convert_brightness_from_user(&caps, max / 2);
+	without_curve = convert_brightness_from_user(&caps, user_max / 2);
 
 	/* Custom curve should produce a different mapping */
 	KUNIT_EXPECT_NE(test, with_curve, without_curve);
@@ -1465,16 +1467,16 @@ static void dm_test_brightness_from_user_with_curve(struct kunit *test)
 static void dm_test_brightness_range_zero_signals(struct kunit *test)
 {
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min = 99, max = 99;
+	unsigned int user_min = 99, user_max = 99;
 
 	caps.aux_support = false;
 	caps.min_input_signal = 0;
 	caps.max_input_signal = 0;
 
-	/* Both signals zero → min=max=0 */
-	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 1);
-	KUNIT_EXPECT_EQ(test, min, 0U);
-	KUNIT_EXPECT_EQ(test, max, 0U);
+	/* Both signals zero → user_min=user_max=0 */
+	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &user_min, &user_max), 1);
+	KUNIT_EXPECT_EQ(test, user_min, 0U);
+	KUNIT_EXPECT_EQ(test, user_max, 0U);
 }
 
 /* Tests for amdgpu_dm_backlight_fill_props() */
@@ -1487,19 +1489,19 @@ static void dm_test_backlight_fill_props_ac_linear(struct kunit *test)
 {
 	struct backlight_properties props = {};
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.min_input_signal = 12;
 	caps.max_input_signal = 255;
 	caps.ac_level = 40;
 	caps.dc_level = 20;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 	amdgpu_dm_backlight_fill_props(&caps, true, false, &props);
 
 	KUNIT_EXPECT_EQ(test, props.brightness,
-			 DIV_ROUND_CLOSEST(max * caps.ac_level, 100));
-	KUNIT_EXPECT_EQ(test, props.max_brightness, max);
+			 DIV_ROUND_CLOSEST(user_max * caps.ac_level, 100));
+	KUNIT_EXPECT_EQ(test, props.max_brightness, user_max);
 	KUNIT_EXPECT_EQ(test, props.scale, BACKLIGHT_SCALE_LINEAR);
 	KUNIT_EXPECT_EQ(test, props.type, BACKLIGHT_RAW);
 }
@@ -1512,7 +1514,7 @@ static void dm_test_backlight_fill_props_dc_nonlinear(struct kunit *test)
 {
 	struct backlight_properties props = {};
 	struct amdgpu_dm_backlight_caps caps = {};
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
 	caps.min_input_signal = 12;
 	caps.max_input_signal = 255;
@@ -1520,12 +1522,12 @@ static void dm_test_backlight_fill_props_dc_nonlinear(struct kunit *test)
 	caps.dc_level = 20;
 	caps.data_points = 2;
 
-	get_brightness_range(&caps, &min, &max);
+	get_brightness_range(&caps, &user_min, &user_max);
 	amdgpu_dm_backlight_fill_props(&caps, false, true, &props);
 
 	KUNIT_EXPECT_EQ(test, props.brightness,
-			 DIV_ROUND_CLOSEST(max * caps.dc_level, 100));
-	KUNIT_EXPECT_EQ(test, props.max_brightness, max);
+			 DIV_ROUND_CLOSEST(user_max * caps.dc_level, 100));
+	KUNIT_EXPECT_EQ(test, props.max_brightness, user_max);
 	KUNIT_EXPECT_EQ(test, props.scale, BACKLIGHT_SCALE_NON_LINEAR);
 	KUNIT_EXPECT_EQ(test, props.type, BACKLIGHT_RAW);
 }

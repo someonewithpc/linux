@@ -98,34 +98,34 @@ EXPORT_IF_KUNIT(amdgpu_dm_update_backlight_caps);
 
 STATIC_IFN_KUNIT
 int get_brightness_range(const struct amdgpu_dm_backlight_caps *caps,
-			 unsigned int *min, unsigned int *max)
+			 unsigned int *user_min, unsigned int *user_max)
 {
 	if (!caps)
 		return 0;
 
 	if (caps->aux_support) {
 		/* Firmware limits are in nits, DC API wants millinits. */
-		*max = 1000 * caps->aux_max_input_signal;
-		*min = 1000 * caps->aux_min_input_signal;
+		*user_max = 1000 * caps->aux_max_input_signal;
+		*user_min = 1000 * caps->aux_min_input_signal;
 	} else {
 		/* Firmware limits are 8-bit, PWM control is 16-bit. */
-		*max = 0x101 * caps->max_input_signal;
-		*min = 0x101 * caps->min_input_signal;
+		*user_max = 0x101 * caps->max_input_signal;
+		*user_min = 0x101 * caps->min_input_signal;
 	}
 	return 1;
 }
 EXPORT_IF_KUNIT(get_brightness_range);
 
-/* Rescale userspace [0..max] to the firmware curve's [0..255]. */
-static inline u32 scale_input_to_fw(int max, u64 input)
+/* Rescale userspace [0..user_max] to the firmware curve's [0..255]. */
+static inline u32 scale_input_to_fw(int user_max, u64 input)
 {
-	return DIV_ROUND_CLOSEST_ULL(input * AMDGPU_MAX_BL_LEVEL, max);
+	return DIV_ROUND_CLOSEST_ULL(input * AMDGPU_MAX_BL_LEVEL, user_max);
 }
 
-/* Rescale from [0..AMDGPU_MAX_BL_LEVEL] to [0..max] */
-static inline u32 scale_fw_to_input(int max, u64 input)
+/* Rescale from [0..AMDGPU_MAX_BL_LEVEL] to [0..user_max] */
+static inline u32 scale_fw_to_input(int user_max, u64 input)
 {
-	return DIV_ROUND_CLOSEST_ULL(input * max, AMDGPU_MAX_BL_LEVEL);
+	return DIV_ROUND_CLOSEST_ULL(input * user_max, AMDGPU_MAX_BL_LEVEL);
 }
 
 static u32 backlight_signal_to_luminance(const struct amdgpu_dm_backlight_caps *caps,
@@ -173,18 +173,18 @@ static u32 backlight_signal_to_luminance(const struct amdgpu_dm_backlight_caps *
 static u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_caps *caps,
 					      u32 user_brightness)
 {
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 	u32 signal, luminance;
 
-	if (!get_brightness_range(caps, &min, &max))
+	if (!get_brightness_range(caps, &user_min, &user_max))
 		return DIV_ROUND_CLOSEST_ULL((u64)user_brightness * 100000,
 					     MAX_BACKLIGHT_LEVEL);
 
-	user_brightness = clamp(user_brightness, min, max);
+	user_brightness = clamp(user_brightness, user_min, user_max);
 	if (amdgpu_dc_debug_mask & DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE)
-		return DIV_ROUND_CLOSEST_ULL((u64)user_brightness * 100000, max);
+		return DIV_ROUND_CLOSEST_ULL((u64)user_brightness * 100000, user_max);
 
-	signal = scale_input_to_fw(max, user_brightness);
+	signal = scale_input_to_fw(user_max, user_brightness);
 	luminance = backlight_signal_to_luminance(caps, signal);
 
 	return min_t(u32, luminance * 1000, 100000);
@@ -192,9 +192,9 @@ static u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_c
 
 STATIC_IFN_KUNIT
 void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
-			       unsigned int max, uint32_t *user_brightness)
+			       unsigned int user_max, uint32_t *user_brightness)
 {
-	u32 brightness = scale_input_to_fw(max, *user_brightness);
+	u32 brightness = scale_input_to_fw(user_max, *user_brightness);
 	u8 lower_signal, upper_signal, upper_lum, lower_lum, lum;
 	int left, right;
 
@@ -250,7 +250,7 @@ void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 						    (brightness - lower_signal),
 						    upper_signal - lower_signal);
 scale:
-	*user_brightness = scale_fw_to_input(max, DIV_ROUND_CLOSEST(lum * brightness, 101));
+	*user_brightness = scale_fw_to_input(user_max, DIV_ROUND_CLOSEST(lum * brightness, 101));
 }
 
 EXPORT_IF_KUNIT(convert_custom_brightness);
@@ -259,15 +259,15 @@ STATIC_IFN_KUNIT
 u32 convert_brightness_from_user(const struct amdgpu_dm_backlight_caps *caps,
 				uint32_t brightness)
 {
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
-	if (!get_brightness_range(caps, &min, &max))
+	if (!get_brightness_range(caps, &user_min, &user_max))
 		return brightness;
 
-	convert_custom_brightness(caps, max, &brightness);
+	convert_custom_brightness(caps, user_max, &brightness);
 
-	/* Rescale 0..max to min..max */
-	return min + DIV_ROUND_CLOSEST_ULL((u64)(max - min) * brightness, max);
+	/* Rescale 0..user_max to user_min..user_max */
+	return user_min + DIV_ROUND_CLOSEST_ULL((u64)(user_max - user_min) * brightness, user_max);
 }
 
 EXPORT_IF_KUNIT(convert_brightness_from_user);
@@ -276,16 +276,16 @@ STATIC_IFN_KUNIT
 u32 convert_brightness_to_user(const struct amdgpu_dm_backlight_caps *caps,
 			      uint32_t brightness)
 {
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
-	if (!get_brightness_range(caps, &min, &max))
+	if (!get_brightness_range(caps, &user_min, &user_max))
 		return brightness;
 
-	if (brightness < min)
+	if (brightness < user_min)
 		return 0;
-	/* Rescale min..max to 0..max */
-	return DIV_ROUND_CLOSEST_ULL((u64)max * (brightness - min),
-				 max - min);
+	/* Rescale user_min..user_max to 0..user_max */
+	return DIV_ROUND_CLOSEST_ULL((u64)user_max * (brightness - user_min),
+				 user_max - user_min);
 }
 EXPORT_IF_KUNIT(convert_brightness_to_user);
 
@@ -484,16 +484,14 @@ void amdgpu_dm_backlight_fill_props(const struct amdgpu_dm_backlight_caps *caps,
 				    bool custom_curve_enabled,
 				    struct backlight_properties *props)
 {
-	unsigned int min, max;
+	unsigned int user_min, user_max;
 
-	if (get_brightness_range(caps, &min, &max)) {
+	if (get_brightness_range(caps, &user_min, &user_max)) {
 		if (is_system_supplied)
-			props->brightness = DIV_ROUND_CLOSEST(max * caps->ac_level,
-							       100);
+			props->brightness = DIV_ROUND_CLOSEST(user_max * caps->ac_level, 100);
 		else
-			props->brightness = DIV_ROUND_CLOSEST(max * caps->dc_level,
-							       100);
-		props->max_brightness = max;
+			props->brightness = DIV_ROUND_CLOSEST(user_max * caps->dc_level, 100);
+		props->max_brightness = user_max;
 	} else {
 		props->brightness = MAX_BACKLIGHT_LEVEL;
 		props->max_brightness = MAX_BACKLIGHT_LEVEL;
