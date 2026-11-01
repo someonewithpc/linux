@@ -39,6 +39,7 @@
 #include "modules/inc/mod_power.h"
 
 #include <linux/backlight.h>
+#include <linux/math64.h>
 #include <linux/minmax.h>
 #include <linux/power_supply.h>
 #include <drm/drm_edid.h>
@@ -128,53 +129,59 @@ static inline u32 scale_fw_to_input(int user_max, u64 input)
 	return DIV_ROUND_CLOSEST_ULL(input * user_max, AMDGPU_MAX_BL_LEVEL);
 }
 
-static u32 backlight_signal_to_luminance(const struct amdgpu_dm_backlight_caps *caps,
-					 u32 signal)
+/*
+ * Map user level 0..user_max to 0..output_max through the custom curve,
+ * which ends at 100% at signal_max, or at AMDGPU_MAX_BL_LEVEL when the
+ * last point lies past signal_max. A point at signal s sits at user
+ * level s * user_max / AMDGPU_MAX_BL_LEVEL, so compare
+ * user * AMDGPU_MAX_BL_LEVEL against s * user_max rather than rounding the
+ * user level to 8 bits
+ */
+static u32 backlight_custom_curve_scale(const struct amdgpu_dm_backlight_caps *caps,
+					u32 user, u32 user_max, u32 signal_max,
+					u32 output_max)
 {
-	u32 lower_signal, upper_signal;
-	u32 lower_lum, upper_lum;
+	u64 x, x0 = 0, x1, num, den;
+	u32 l0 = 0, l1 = 100;
 	int i;
 
+	user = min(user, user_max);
 	if (!caps->data_points)
-		return DIV_ROUND_CLOSEST(signal * 100, AMDGPU_MAX_BL_LEVEL);
+		return DIV_ROUND_CLOSEST_ULL((u64)user * output_max, user_max);
 
-	if (signal < caps->luminance_data[0].input_signal) {
-		lower_signal = 0;
-		lower_lum = 0;
-		upper_signal = caps->luminance_data[0].input_signal;
-		upper_lum = caps->luminance_data[0].luminance;
-	} else if (signal >=
-		   caps->luminance_data[caps->data_points - 1].input_signal) {
-		lower_signal = caps->luminance_data[caps->data_points - 1].input_signal;
-		lower_lum = caps->luminance_data[caps->data_points - 1].luminance;
-		upper_signal = caps->max_input_signal;
-		upper_lum = 100;
-	} else {
-		for (i = 1;
-		     i < caps->data_points &&
-		     signal > caps->luminance_data[i].input_signal;
-		     i++)
-			;
+	x = (u64)user * AMDGPU_MAX_BL_LEVEL;
+	for (i = 0; i < caps->data_points; i++) {
+		u64 xi = (u64)caps->luminance_data[i].input_signal * user_max;
 
-		lower_signal = caps->luminance_data[i - 1].input_signal;
-		upper_signal = caps->luminance_data[i].input_signal;
-		lower_lum = caps->luminance_data[i - 1].luminance;
-		upper_lum = caps->luminance_data[i].luminance;
+		if (x < xi)
+			break;
+		x0 = xi;
+		l0 = caps->luminance_data[i].luminance;
 	}
 
-	if (upper_signal == lower_signal)
-		return upper_lum;
+	if (i < caps->data_points) {
+		x1 = (u64)caps->luminance_data[i].input_signal * user_max;
+		l1 = caps->luminance_data[i].luminance;
+	} else {
+		x1 = (u64)signal_max * user_max;
+		if (x0 > x1)
+			x1 = (u64)AMDGPU_MAX_BL_LEVEL * user_max;
+		if (x >= x1)
+			return output_max;
+	}
 
-	return lower_lum + DIV_ROUND_CLOSEST((upper_lum - lower_lum) *
-					     (signal - lower_signal),
-					     upper_signal - lower_signal);
+	/* x0 <= x < x1, so neither weight wraps */
+	num = (u64)l0 * (x1 - x) + (u64)l1 * (x - x0);
+	den = 100 * (x1 - x0);
+
+	return min_t(u64, mul_u64_add_u64_div_u64(output_max, num, den / 2, den),
+		     output_max);
 }
 
 static u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_caps *caps,
 					      u32 user_brightness)
 {
 	unsigned int user_min, user_max;
-	u32 signal, luminance;
 
 	if (!get_brightness_range(caps, &user_min, &user_max))
 		return DIV_ROUND_CLOSEST_ULL((u64)user_brightness * 100000,
@@ -184,10 +191,8 @@ static u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_c
 	if (amdgpu_dc_debug_mask & DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE)
 		return DIV_ROUND_CLOSEST_ULL((u64)user_brightness * 100000, user_max);
 
-	signal = scale_input_to_fw(user_max, user_brightness);
-	luminance = backlight_signal_to_luminance(caps, signal);
-
-	return min_t(u32, luminance * 1000, 100000);
+	return backlight_custom_curve_scale(caps, user_brightness, user_max,
+					    caps->max_input_signal, 100000);
 }
 
 STATIC_IFN_KUNIT
