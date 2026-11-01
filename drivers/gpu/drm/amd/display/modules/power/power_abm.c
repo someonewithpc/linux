@@ -3,6 +3,7 @@
 // Copyright 2026 Advanced Micro Devices, Inc.
 
 #include "dm_services.h"
+#include "dm_helpers.h"
 #include "dc.h"
 #include "mod_power.h"
 #include "core_types.h"
@@ -433,7 +434,8 @@ static unsigned int backlight_pwm_to_millipercent_legacy(
  * 0 PWM = 0% and max_backlight_pwm = 100%.
  * Otherwise, falls back to the legacy LUT based mapping.
  */
-static unsigned int backlight_pwm_to_millipercent(
+STATIC_IFN_KUNIT
+unsigned int backlight_pwm_to_millipercent(
 		struct core_power *core_power, unsigned int pwm, unsigned int inst)
 {
 	if (!is_vesa_abc(core_power, inst))
@@ -452,6 +454,7 @@ static unsigned int backlight_pwm_to_millipercent(
 			BACKLIGHT_MILLIPERCENT_MAX,
 			core_power->bl_prop[inst].max_backlight_pwm);
 }
+EXPORT_IF_KUNIT(backlight_pwm_to_millipercent);
 
 static unsigned int backlight_pwm_to_millinit_legacy(
 		struct core_power *core_power, unsigned int pwm, unsigned int inst)
@@ -579,6 +582,7 @@ unsigned int backlight_millipercent_to_pwm(
 			core_power->bl_prop[inst].max_backlight_pwm,
 			BACKLIGHT_MILLIPERCENT_MAX);
 }
+EXPORT_IF_KUNIT(backlight_millipercent_to_pwm);
 
 /* Legacy millinit→PWM conversion: scales linearly between
  * [min_brightness_millinits, max_brightness_millinits] → [min_backlight_pwm, max_backlight_pwm].
@@ -837,6 +841,7 @@ void initialize_backlight_caps(struct core_power *core_power, unsigned int inst)
 	/* Successfully initialized */
 	core_power->bl_prop[inst].backlight_caps_valid = true;
 }
+EXPORT_IF_KUNIT(initialize_backlight_caps);
 
 static void varibright_set_level(struct core_power *core_power)
 {
