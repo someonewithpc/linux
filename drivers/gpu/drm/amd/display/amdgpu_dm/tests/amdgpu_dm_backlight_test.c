@@ -10,6 +10,7 @@
 #include <linux/pm_runtime.h>
 
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_kunit_helpers.h>
 #include <drm/drm_managed.h>
@@ -564,16 +565,43 @@ static const struct drm_connector_helper_funcs dm_test_pps_connector_helper_func
 	.get_modes = dm_test_pps_get_modes,
 };
 
+static int dm_test_pps_crtc_atomic_check_fail(struct drm_crtc *crtc,
+					      struct drm_atomic_commit *state)
+{
+	return -ENOSPC;
+}
+
+static const struct drm_crtc_helper_funcs dm_test_pps_crtc_helper_funcs_fail = {
+	.atomic_check = dm_test_pps_crtc_atomic_check_fail,
+};
+
+/* The generic helpers accept a commit that allows a modeset it doesn't need */
+static int dm_test_pps_crtc_atomic_check_no_modeset(struct drm_crtc *crtc,
+						    struct drm_atomic_commit *state)
+{
+	return state->allow_modeset ? -EINVAL : 0;
+}
+
+static const struct drm_crtc_helper_funcs dm_test_pps_crtc_helper_funcs_no_modeset = {
+	.atomic_check = dm_test_pps_crtc_atomic_check_no_modeset,
+};
+
 /*
  * Build a primary plane, a CRTC, an encoder and an eDP connector that the
- * store can commit to. The KUnit device uses the generic atomic helpers, so a
- * commit runs drm_atomic_helper_check() and drm_atomic_helper_commit() rather
- * than the DM implementations
+ * store can commit to. With @bound, the connector's current state is routed
+ * to the CRTC, which is enabled and has @active as its active state. The KUnit
+ * device uses the generic atomic helpers, so a commit runs
+ * drm_atomic_helper_check() and drm_atomic_helper_commit() rather than the DM
+ * implementations. A NULL @crtc_helper_funcs gives the KUnit helper's defaults
  */
 static struct drm_connector *
-setup_panel_power_savings_pipe(struct kunit *test, struct device **device_out)
+setup_panel_power_savings_pipe(struct kunit *test, struct device **device_out,
+			       bool bound, bool active,
+			       const struct drm_crtc_helper_funcs *crtc_helper_funcs)
 {
 	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+	struct drm_crtc_state *crtc_state;
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct amdgpu_device *adev;
@@ -589,7 +617,7 @@ setup_panel_power_savings_pipe(struct kunit *test, struct device **device_out)
 							NULL, NULL, 0, NULL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, primary);
 	crtc = drm_kunit_helper_create_crtc(test, &adev->ddev, primary, NULL,
-					    NULL, NULL);
+					    NULL, crtc_helper_funcs);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, crtc);
 
 	encoder = drmm_kzalloc(&adev->ddev, sizeof(*encoder), GFP_KERNEL);
@@ -610,12 +638,56 @@ setup_panel_power_savings_pipe(struct kunit *test, struct device **device_out)
 	drm_mode_config_reset(&adev->ddev);
 	KUNIT_ASSERT_NOT_NULL(test, connector->state);
 
+	if (bound) {
+		/* A connector state bound to a CRTC holds a connector reference */
+		connector->state->crtc = crtc;
+		drm_connector_get(connector);
+		connector->state->best_encoder = encoder;
+		crtc_state = crtc->state;
+		crtc_state->connector_mask = drm_connector_mask(connector);
+		crtc_state->encoder_mask = drm_encoder_mask(encoder);
+		crtc_state->enable = true;
+		crtc_state->active = active;
+		mode = drm_kunit_display_mode_from_cea_vic(test, &adev->ddev, 1);
+		KUNIT_ASSERT_NOT_NULL(test, mode);
+		KUNIT_ASSERT_EQ(test, drm_atomic_set_mode_for_crtc(crtc_state, mode), 0);
+	}
+
 	device = kunit_kzalloc(test, sizeof(*device), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, device);
 	dev_set_drvdata(device, connector);
 	*device_out = device;
 
 	return connector;
+}
+
+static void dm_test_pps_expect_no_pm_reference(struct kunit *test,
+					       struct drm_connector *connector)
+{
+#ifdef CONFIG_PM
+	KUNIT_EXPECT_EQ(test, atomic_read(&connector->dev->dev->power.usage_count), 0);
+#endif
+}
+
+static void dm_test_pps_runtime_suspend(struct kunit *test,
+					struct drm_connector *connector)
+{
+#ifdef CONFIG_PM
+	struct device *dev = connector->dev->dev;
+
+	pm_runtime_disable(dev);
+	KUNIT_ASSERT_EQ(test, pm_runtime_set_suspended(dev), 0);
+	pm_runtime_enable(dev);
+#endif
+}
+
+static void dm_test_pps_expect_still_suspended(struct kunit *test,
+					       struct drm_connector *connector)
+{
+#ifdef CONFIG_PM
+	KUNIT_EXPECT_TRUE(test, pm_runtime_suspended(connector->dev->dev));
+#endif
+	dm_test_pps_expect_no_pm_reference(test, connector);
 }
 
 static void dm_test_free_sysfs_buf(void *data)
@@ -678,18 +750,24 @@ static void dm_test_panel_power_savings_show_reports_level(struct kunit *test)
 /**
  * dm_test_panel_power_savings_store_sets_disable - Test zero maps to disable
  * @test: The KUnit test context
+ *
+ * With no CRTC on the connector, the store commits a connector state that
+ * carries the disable sentinel
  */
 static void dm_test_panel_power_savings_store_sets_disable(struct kunit *test)
 {
+	struct drm_connector_state *old_state;
 	struct drm_connector *connector;
 	struct device *device;
 	size_t count = strlen("0");
 
-	connector = setup_panel_power_savings_pipe(test, &device);
+	connector = setup_panel_power_savings_pipe(test, &device, false, false, NULL);
 	to_dm_connector_state(connector->state)->abm_level = 2;
+	old_state = connector->state;
 
 	KUNIT_EXPECT_EQ(test, panel_power_savings_store(device, NULL, "0", count),
 			 (ssize_t)count);
+	KUNIT_EXPECT_PTR_NE(test, connector->state, old_state);
 	KUNIT_EXPECT_EQ(test, to_dm_connector_state(connector->state)->abm_level,
 			ABM_LEVEL_IMMEDIATE_DISABLE);
 }
@@ -697,6 +775,9 @@ static void dm_test_panel_power_savings_store_sets_disable(struct kunit *test)
 /**
  * dm_test_panel_power_savings_store_forbidden - Test forbidden update
  * @test: The KUnit test context
+ *
+ * Once the DRM master owns the level, the store fails without committing and
+ * without waking the runtime-suspended GPU
  */
 static void dm_test_panel_power_savings_store_forbidden(struct kunit *test)
 {
@@ -704,11 +785,16 @@ static void dm_test_panel_power_savings_store_forbidden(struct kunit *test)
 	struct drm_connector *connector;
 	struct device *device;
 
-	connector = setup_panel_power_savings_pipe(test, &device);
+	connector = setup_panel_power_savings_pipe(test, &device, false, false, NULL);
 	dm_state = to_dm_connector_state(connector->state);
 	dm_state->abm_sysfs_forbidden = true;
+	dm_state->abm_level = 2;
+	dm_test_pps_runtime_suspend(test, connector);
 
 	KUNIT_EXPECT_EQ(test, panel_power_savings_store(device, NULL, "1", 1), -EBUSY);
+	KUNIT_EXPECT_PTR_EQ(test, connector->state, &dm_state->base);
+	KUNIT_EXPECT_EQ(test, dm_state->abm_level, 2);
+	dm_test_pps_expect_still_suspended(test, connector);
 }
 
 /**
@@ -755,6 +841,98 @@ static void dm_test_panel_power_savings_store_rejects_out_of_range(struct kunit 
 	dev_set_drvdata(device, connector);
 
 	KUNIT_EXPECT_EQ(test, panel_power_savings_store(device, NULL, "5", 1), -EINVAL);
+}
+
+struct dm_pps_store_crtc_param {
+	const char *name;
+	bool active;
+	const char *buf;
+	int level;
+};
+
+static const struct dm_pps_store_crtc_param dm_pps_store_crtc_params[] = {
+	{ "inactive", false, "3", 3 },
+	{ "active", true, "2", 2 },
+};
+
+KUNIT_ARRAY_PARAM_DESC(dm_pps_store_crtc, dm_pps_store_crtc_params, name);
+
+/**
+ * dm_test_panel_power_savings_store_crtc - Test store with the CRTC on or off
+ * @test: The KUnit test context
+ *
+ * With the connector's CRTC enabled, active or not, the store commits a
+ * connector state that carries the level, without allowing a modeset, and
+ * drops its runtime PM reference
+ */
+static void dm_test_panel_power_savings_store_crtc(struct kunit *test)
+{
+	const struct dm_pps_store_crtc_param *param = test->param_value;
+	struct drm_connector_state *old_state;
+	struct drm_connector *connector;
+	struct device *device;
+
+	connector = setup_panel_power_savings_pipe(test, &device, true, param->active,
+						   &dm_test_pps_crtc_helper_funcs_no_modeset);
+	old_state = connector->state;
+
+	KUNIT_EXPECT_EQ(test, panel_power_savings_store(device, NULL, param->buf, 1), 1);
+	KUNIT_EXPECT_PTR_NE(test, connector->state, old_state);
+	KUNIT_EXPECT_EQ(test, to_dm_connector_state(connector->state)->abm_level,
+			param->level);
+	KUNIT_EXPECT_FALSE(test, drm_atomic_crtc_needs_modeset(connector->state->crtc->state));
+	dm_test_pps_expect_no_pm_reference(test, connector);
+}
+
+/**
+ * dm_test_panel_power_savings_store_commit_fails - Test store when the commit fails
+ * @test: The KUnit test context
+ *
+ * When atomic check rejects the commit, the write returns the error, the
+ * current connector state keeps the old level and the runtime PM reference is
+ * dropped
+ */
+static void dm_test_panel_power_savings_store_commit_fails(struct kunit *test)
+{
+	struct drm_connector_state *old_state;
+	struct drm_connector *connector;
+	struct device *device;
+
+	connector = setup_panel_power_savings_pipe(test, &device, true, true,
+						   &dm_test_pps_crtc_helper_funcs_fail);
+	to_dm_connector_state(connector->state)->abm_level = 1;
+	old_state = connector->state;
+
+	KUNIT_EXPECT_EQ(test, panel_power_savings_store(device, NULL, "4", 1), -ENOSPC);
+	KUNIT_EXPECT_PTR_EQ(test, connector->state, old_state);
+	KUNIT_EXPECT_EQ(test, to_dm_connector_state(connector->state)->abm_level, 1);
+	dm_test_pps_expect_no_pm_reference(test, connector);
+}
+
+/**
+ * dm_test_panel_power_savings_store_same_level - Test store of the current level
+ * @test: The KUnit test context
+ *
+ * Writing the level the connector already has succeeds without a commit, so
+ * the connector keeps its state even though atomic check would fail, and the
+ * runtime-suspended GPU stays suspended
+ */
+static void dm_test_panel_power_savings_store_same_level(struct kunit *test)
+{
+	struct drm_connector_state *old_state;
+	struct drm_connector *connector;
+	struct device *device;
+
+	connector = setup_panel_power_savings_pipe(test, &device, true, true,
+						   &dm_test_pps_crtc_helper_funcs_fail);
+	to_dm_connector_state(connector->state)->abm_level = 2;
+	old_state = connector->state;
+	dm_test_pps_runtime_suspend(test, connector);
+
+	KUNIT_EXPECT_EQ(test, panel_power_savings_store(device, NULL, "2", 1), 1);
+	KUNIT_EXPECT_PTR_EQ(test, connector->state, old_state);
+	KUNIT_EXPECT_EQ(test, to_dm_connector_state(connector->state)->abm_level, 2);
+	dm_test_pps_expect_still_suspended(test, connector);
 }
 
 /* Tests for amdgpu_dm_backlight_get_device_index() */
@@ -2019,6 +2197,9 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_panel_power_savings_store_forbidden),
 	KUNIT_CASE(dm_test_panel_power_savings_store_rejects_invalid_text),
 	KUNIT_CASE(dm_test_panel_power_savings_store_rejects_out_of_range),
+	KUNIT_CASE_PARAM(dm_test_panel_power_savings_store_crtc, dm_pps_store_crtc_gen_params),
+	KUNIT_CASE(dm_test_panel_power_savings_store_commit_fails),
+	KUNIT_CASE(dm_test_panel_power_savings_store_same_level),
 	/* amdgpu_dm_backlight_get_device_index */
 	KUNIT_CASE(dm_test_backlight_device_index_matches_second),
 	KUNIT_CASE(dm_test_backlight_device_index_missing_fallback),
