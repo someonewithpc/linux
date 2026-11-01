@@ -40,7 +40,10 @@
 
 #include <linux/backlight.h>
 #include <linux/minmax.h>
+#include <linux/pm_runtime.h>
 #include <linux/power_supply.h>
+#include <drm/drm_atomic.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_utils.h>
 
@@ -691,6 +694,18 @@ EXPORT_IF_KUNIT(amdgpu_dm_setup_backlight_device);
  *
  * Modifying this value can have implications on color accuracy, so tread
  * carefully.
+ *
+ * A write commits the new level before it returns, without a modeset. The
+ * commit waits for any commit already pending on the connector's CRTC, and
+ * a commit from the DRM master on that CRTC waits for the write. If the
+ * connector or its CRTC is off, the driver stores the level and applies it
+ * when the connector is next enabled
+ *
+ * If the commit fails, the write returns its error and the level stays as it
+ * was. While the CRTC needs a modeset, as after a DSC override in debugfs,
+ * writes fail with -EINVAL until a commit that allows a modeset clears that
+ * state. Writes fail with -EBUSY once the DRM master has set the connector's
+ * 'adaptive backlight modulation' property to a value other than 'sysfs'
  */
 
 STATIC_IFN_KUNIT
@@ -712,13 +727,100 @@ ssize_t panel_power_savings_show(struct device *device,
 }
 EXPORT_IF_KUNIT(panel_power_savings_show);
 
+static int panel_power_savings_apply(struct drm_connector *connector,
+				     unsigned int level)
+{
+	struct drm_connector_state *conn_state;
+	struct dm_connector_state *dm_state;
+	struct drm_device *dev = connector->dev;
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_atomic_commit *state;
+	bool forbidden, unchanged;
+	int ret, idx;
+
+	level = level ?: ABM_LEVEL_IMMEDIATE_DISABLE;
+
+	if (!drm_dev_enter(dev, &idx))
+		return -ENODEV;
+
+	/*
+	 * Don't wake the GPU for a write that changes nothing. The duplicated
+	 * state below is checked again. This check only spares the runtime resume
+	 */
+	ret = drm_modeset_lock_single_interruptible(&dev->mode_config.connection_mutex);
+	if (ret)
+		goto dev_exit;
+	dm_state = to_dm_connector_state(connector->state);
+	forbidden = dm_state->abm_sysfs_forbidden;
+	unchanged = dm_state->abm_level == level;
+	drm_modeset_unlock(&dev->mode_config.connection_mutex);
+
+	if (forbidden || unchanged) {
+		ret = forbidden ? -EBUSY : 0;
+		goto dev_exit;
+	}
+
+	ret = pm_runtime_resume_and_get(dev->dev);
+	if (ret < 0)
+		goto dev_exit;
+
+	state = drm_atomic_commit_alloc(dev);
+	if (!state) {
+		ret = -ENOMEM;
+		goto pm_put;
+	}
+
+	/* Kernel commits allow a modeset by default, which a level change doesn't need */
+	state->allow_modeset = false;
+
+	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
+	state->acquire_ctx = &ctx;
+retry:
+	conn_state = drm_atomic_get_connector_state(state, connector);
+	if (IS_ERR(conn_state)) {
+		ret = PTR_ERR(conn_state);
+		goto out;
+	}
+
+	dm_state = to_dm_connector_state(conn_state);
+	if (dm_state->abm_sysfs_forbidden) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	if (dm_state->abm_level == level) {
+		ret = 0;
+		goto out;
+	}
+
+	dm_state->abm_level = level;
+
+	ret = drm_atomic_commit(state);
+out:
+	if (ret == -EDEADLK) {
+		drm_atomic_commit_clear(state);
+		ret = drm_modeset_backoff(&ctx);
+		if (!ret)
+			goto retry;
+	}
+
+	drm_atomic_commit_put(state);
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
+pm_put:
+	pm_runtime_put_autosuspend(dev->dev);
+dev_exit:
+	drm_dev_exit(idx);
+
+	return ret;
+}
+
 STATIC_IFN_KUNIT
 ssize_t panel_power_savings_store(struct device *device,
 				 struct device_attribute *attr,
 				 const char *buf, size_t count)
 {
 	struct drm_connector *connector = dev_get_drvdata(device);
-	struct drm_device *dev = connector->dev;
 	long val;
 	int ret;
 
@@ -730,18 +832,12 @@ ssize_t panel_power_savings_store(struct device *device,
 	if (val < 0 || val > 4)
 		return -EINVAL;
 
-	drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
-	if (to_dm_connector_state(connector->state)->abm_sysfs_forbidden)
-		ret = -EBUSY;
-	else
-		to_dm_connector_state(connector->state)->abm_level = val ?:
-			ABM_LEVEL_IMMEDIATE_DISABLE;
-	drm_modeset_unlock(&dev->mode_config.connection_mutex);
-
+	ret = panel_power_savings_apply(connector, val);
+	/* The modeset locks return -EINTR, which write(2) would not restart */
+	if (ret == -EINTR)
+		return -ERESTARTSYS;
 	if (ret)
 		return ret;
-
-	drm_kms_helper_hotplug_event(dev);
 
 	return count;
 }
