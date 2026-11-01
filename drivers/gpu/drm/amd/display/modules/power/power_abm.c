@@ -409,34 +409,20 @@ static unsigned int backlight_pwm_to_millipercent_legacy(
 			break;
 	}
 
-	/* In this case, exact match is not found. Check if mid/min/max
-	 * value is actually closer.
-	 */
+	/* No exact match, so lut[max] < pwm < lut[min] with min == max + 1 */
 	if (max < min) {
-		unsigned int min_delta;
-		unsigned int mid_delta;
-		unsigned int max_delta;
+		unsigned int lower = core_power->bl_prop[inst].backlight_lut[max];
+		unsigned int upper = core_power->bl_prop[inst].backlight_lut[min];
+		unsigned int fraction;
 
-		min_delta = (core_power->bl_prop[inst].backlight_lut[min] > pwm) ?
-				core_power->bl_prop[inst].backlight_lut[min] - pwm :
-				pwm - core_power->bl_prop[inst].backlight_lut[min];
+		fraction = (unsigned int)div_u64((unsigned long long)(pwm - lower) *
+						 BACKLIGHT_MILLIPERCENT_MAX + (upper - lower) / 2,
+						 upper - lower);
 
-		mid_delta = (core_power->bl_prop[inst].backlight_lut[mid] > pwm) ?
-				core_power->bl_prop[inst].backlight_lut[mid] - pwm :
-				pwm - core_power->bl_prop[inst].backlight_lut[mid];
-
-		max_delta = (core_power->bl_prop[inst].backlight_lut[max] > pwm) ?
-				core_power->bl_prop[inst].backlight_lut[max] - pwm :
-				pwm - core_power->bl_prop[inst].backlight_lut[max];
-
-		if ((min_delta < mid_delta) && (min_delta < max_delta))
-			mid = min;
-
-		if ((max_delta < mid_delta) && (max_delta < min_delta))
-			mid = max;
+		return (unsigned int)div_u64((unsigned long long)max * BACKLIGHT_MILLIPERCENT_MAX +
+					     fraction + max_index / 2, max_index);
 	}
 
-	/* No interpolation, just take closest index */
 	millipercent = BACKLIGHT_MILLIPERCENT_MAX * mid / max_index;
 
 	return millipercent;
