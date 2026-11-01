@@ -51,6 +51,48 @@
 #include "dm_helpers.h"
 
 #if defined(CONFIG_ACPI) || IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
+/*
+ * The brightness mapping needs signals that never fall from point to point
+ * and luminance that never falls or passes 100%. Drop a curve whose
+ * signals fall, and flatten the luminance of the others
+ */
+static void backlight_validate_custom_curve(struct amdgpu_display_manager *dm,
+					    struct amdgpu_dm_backlight_caps *caps)
+{
+	struct amdgpu_dm_luminance_data *p = caps->luminance_data;
+	int over = 0, falling = 0;
+	int i;
+
+	if (caps->data_points > ARRAY_SIZE(caps->luminance_data))
+		caps->data_points = ARRAY_SIZE(caps->luminance_data);
+
+	for (i = 1; i < caps->data_points; i++) {
+		if (p[i].input_signal < p[i - 1].input_signal) {
+			dev_warn(dm->adev->dev, FW_BUG
+				 "ATIF: backlight curve signal %u at point %d is below %u, using a linear curve\n",
+				 p[i].input_signal, i, p[i - 1].input_signal);
+			caps->data_points = 0;
+			return;
+		}
+	}
+
+	for (i = 0; i < caps->data_points; i++) {
+		if (p[i].luminance > 100) {
+			p[i].luminance = 100;
+			over++;
+		}
+		if (i && p[i].luminance < p[i - 1].luminance) {
+			p[i].luminance = p[i - 1].luminance;
+			falling++;
+		}
+	}
+
+	if (over || falling)
+		dev_warn(dm->adev->dev, FW_BUG
+			 "ATIF: backlight curve has %d points over 100%%, set to 100%%, and %d falling points, raised to the point before\n",
+			 over, falling);
+}
+
 STATIC_IFN_KUNIT
 void amdgpu_dm_validate_backlight_caps(struct amdgpu_display_manager *dm, int bl_idx)
 {
@@ -65,6 +107,8 @@ void amdgpu_dm_validate_backlight_caps(struct amdgpu_display_manager *dm, int bl
 			    caps->min_input_signal, caps->max_input_signal);
 		caps->caps_valid = false;
 	}
+
+	backlight_validate_custom_curve(dm, caps);
 }
 EXPORT_IF_KUNIT(amdgpu_dm_validate_backlight_caps);
 #endif
