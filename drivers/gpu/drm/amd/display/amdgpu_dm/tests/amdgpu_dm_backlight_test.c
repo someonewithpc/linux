@@ -24,6 +24,7 @@
 #include "amd_shared.h"
 #include "link_service.h"
 #include "dc/inc/hw/panel_cntl.h"
+#include "power_helpers.h"
 
 struct dm_backlight_connector_fixture {
 	struct amdgpu_device *adev;
@@ -2163,6 +2164,145 @@ static void dm_test_setup_backlight_device_attaches_abm_property(struct kunit *t
 	amdgpu_dm_set_abm_level_param(saved_abm_level);
 }
 
+/* Tests for the legacy backlight LUT conversion, in both directions */
+
+/*
+ * Build the power module's backlight LUT from the GV301QH curve the same
+ * way the driver does, through the ATIF caps cached in the display manager
+ */
+static struct core_power *gv301qh_power_module(struct kunit *test, int min_input_signal)
+{
+	struct amdgpu_device *adev = dm_kunit_alloc_adev(test);
+	struct dc *dc = dm_kunit_alloc_dc_with_ctx(test);
+	struct core_power *core_power;
+
+	core_power = kunit_kzalloc(test, sizeof(*core_power), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, core_power);
+
+	set_gv301qh_caps(&adev->dm.backlight_caps[0], false);
+	adev->dm.backlight_caps[0].min_input_signal = min_input_signal;
+	adev->dm.backlight_caps[0].caps_valid = true;
+	dc->ctx->driver_context = adev;
+	core_power->dc = dc;
+	core_power->bl_prop[0].num_backlight_levels = 101;
+	core_power->bl_prop[0].backlight_lut = kunit_kcalloc(test, 101, sizeof(unsigned int),
+							     GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, core_power->bl_prop[0].backlight_lut);
+
+	initialize_backlight_caps(core_power, 0);
+	KUNIT_ASSERT_TRUE(test, core_power->bl_prop[0].backlight_caps_valid);
+
+	return core_power;
+}
+
+/**
+ * dm_test_pwm_lut_whole_percents - Test Whole percents give the LUT entry
+ * @test: The KUnit test context
+ *
+ * With min_input_signal 0 the LUT starts at 0, reaches the first curve
+ * point (signal 14, 2%) at index 2 and has 0x707 halfway at index 1. Index
+ * 50 is the point (98, 50%)
+ */
+static void dm_test_pwm_lut_whole_percents(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 0);
+
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 0, 0), 0U);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 1000, 0), 0x707U);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 2000, 0), 0xe0eU);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 50000, 0), 98U * 0x101);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 100000, 0), 0xffffU);
+}
+
+/**
+ * dm_test_pwm_lut_between_percents - Test Requests between percents interpolate
+ * @test: The KUnit test context
+ *
+ * The code rounds the step between two entries before adding it. 0.5% is
+ * halfway from 0 to 0x707, so 1799 / 2 = 899.5, which rounds to 900. 1.5%
+ * is 1799 + 900 = 2699. 2.5% is halfway from 0xe0e to 0xf0f, so 257 / 2 =
+ * 128.5 rounds to 129 and 3598 + 129 = 3727. 99.999% is 1028 * 999 / 1000
+ * = 1026.97 past 64507, which rounds to 1027 and gives 65534
+ */
+static void dm_test_pwm_lut_between_percents(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 0);
+
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 500, 0), 900U);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 1500, 0), 2699U);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 2500, 0), 3727U);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 99999, 0), 65534U);
+}
+
+/**
+ * dm_test_pwm_lut_readback - Test PWM reads back as the percentage that set it
+ * @test: The KUnit test context
+ *
+ * 900 is halfway from 0 to 0x707, so it reads back as 0.5%. Every PWM from
+ * 0 to 0xffff turned into a percentage and back must land within 1 of
+ * where it started
+ */
+static void dm_test_pwm_lut_readback(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 0);
+	unsigned int pwm, mp;
+
+	KUNIT_EXPECT_EQ(test, backlight_pwm_to_millipercent(core_power, 0x707, 0), 1000U);
+	KUNIT_EXPECT_EQ(test, backlight_pwm_to_millipercent(core_power, 900, 0), 500U);
+
+	for (pwm = 0; pwm <= 0xffff; pwm++) {
+		mp = backlight_pwm_to_millipercent(core_power, pwm, 0);
+		KUNIT_ASSERT_LE_MSG(test,
+				    abs((int)backlight_millipercent_to_pwm(core_power, mp, 0) -
+					(int)pwm), 1,
+				    "pwm %u", pwm);
+	}
+}
+
+/**
+ * dm_test_pwm_lut_monotonic - Test PWM never goes down as the request goes up
+ * @test: The KUnit test context
+ *
+ * Every millipercent below 2% must also get its own PWM, where the floor
+ * index gave only 0 and 0x707
+ */
+static void dm_test_pwm_lut_monotonic(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 0);
+	unsigned int mp, pwm, prev = 0, steps = 0;
+
+	for (mp = 0; mp <= 100000; mp++) {
+		pwm = backlight_millipercent_to_pwm(core_power, mp, 0);
+		KUNIT_ASSERT_GE_MSG(test, pwm, prev, "millipercent %u", mp);
+		if (mp < 2000 && (mp == 0 || pwm != prev))
+			steps++;
+		prev = pwm;
+	}
+
+	KUNIT_EXPECT_EQ(test, steps, 2000U);
+}
+
+/**
+ * dm_test_pwm_lut_min_input_signal - Test the LUT with the real minimum of 12
+ * @test: The KUnit test context
+ *
+ * With min_input_signal 12 the LUT starts at 0xc0c, has 3341 at index 1 and
+ * reaches the first curve point (signal 14, 2%) at index 2, 0xe0e. 1.714%,
+ * the curve's value at the minimum, is 0.714 of the way from 3341 to 0xe0e,
+ * so 3341 + 183 = 3524. A PWM at or below 0xc0c reads back as 0%
+ */
+static void dm_test_pwm_lut_min_input_signal(struct kunit *test)
+{
+	struct core_power *core_power = gv301qh_power_module(test, 12);
+
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 0, 0), 0xc0cU);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 1000, 0), 3341U);
+	KUNIT_EXPECT_EQ(test, backlight_millipercent_to_pwm(core_power, 1714, 0), 3524U);
+	KUNIT_EXPECT_EQ(test, backlight_pwm_to_millipercent(core_power, 3341, 0), 1000U);
+	KUNIT_EXPECT_EQ(test, backlight_pwm_to_millipercent(core_power, 0xc0c, 0), 0U);
+	KUNIT_EXPECT_EQ(test, backlight_pwm_to_millipercent(core_power, 1000, 0), 0U);
+}
+
 static struct kunit_case dm_backlight_test_cases[] = {
 	/* dm_find_stream_with_link */
 	KUNIT_CASE(dm_test_find_stream_with_link_returns_match),
@@ -2255,6 +2395,12 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_setup_backlight_device_max_edps),
 	KUNIT_CASE(dm_test_setup_backlight_device_oled_success),
 	KUNIT_CASE(dm_test_setup_backlight_device_attaches_abm_property),
+	/* legacy backlight LUT conversion */
+	KUNIT_CASE(dm_test_pwm_lut_whole_percents),
+	KUNIT_CASE(dm_test_pwm_lut_between_percents),
+	KUNIT_CASE(dm_test_pwm_lut_readback),
+	KUNIT_CASE(dm_test_pwm_lut_monotonic),
+	KUNIT_CASE(dm_test_pwm_lut_min_input_signal),
 	{}
 };
 
