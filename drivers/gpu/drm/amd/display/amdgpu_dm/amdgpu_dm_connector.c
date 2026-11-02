@@ -1122,32 +1122,31 @@ struct drm_display_mode *
 amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
 		bool use_probed_modes)
 {
+	struct list_head *probed = &aconnector->base.probed_modes;
 	struct drm_display_mode *m_pref;
-	struct list_head *list_head = use_probed_modes ?
-		&aconnector->base.probed_modes :
-		&aconnector->base.modes;
 
 	if (aconnector->base.connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
 		return NULL;
 
+	/*
+	 * Callers that pass use_probed_modes hold &drm_mode_config.mutex, which
+	 * protects probed_modes. During a probe it holds the modes found so far,
+	 * which the copy from the previous probe may not match
+	 */
+	if (use_probed_modes && !list_empty(probed)) {
+		m_pref = dm_find_preferred_mode(probed);
+		/* Probably an EDID with no preferred mode. Fallback to first entry */
+		if (!m_pref)
+			m_pref = list_first_entry(probed, struct drm_display_mode, head);
+
+		return dm_find_highest_refresh_mode(probed, m_pref);
+	}
+
+	/* atomic_check can't take that lock, so it reads only the copy */
 	if (aconnector->freesync_vid_base.clock != 0)
 		return &aconnector->freesync_vid_base;
 
-	m_pref = dm_find_preferred_mode(list_head);
-	if (!m_pref) {
-		/* Probably an EDID with no preferred mode. Fallback to first entry */
-		m_pref = list_first_entry_or_null(
-				&aconnector->base.modes, struct drm_display_mode, head);
-		if (!m_pref) {
-			drm_dbg_driver(aconnector->base.dev, "No preferred mode found in EDID\n");
-			return NULL;
-		}
-	}
-
-	m_pref = dm_find_highest_refresh_mode(list_head, m_pref);
-
-	drm_mode_copy(&aconnector->freesync_vid_base, m_pref);
-	return m_pref;
+	return NULL;
 }
 EXPORT_IF_KUNIT(amdgpu_dm_get_highest_refresh_rate_mode);
 
@@ -1540,7 +1539,6 @@ create_stream_for_sink(struct drm_connector *connector,
 	struct drm_device *dev = connector->dev;
 	struct amdgpu_dm_connector *aconnector = NULL;
 	struct drm_display_mode *preferred_mode = NULL;
-	struct drm_display_mode *connector_mode;
 	const struct drm_connector_state *con_state = &dm_state->base;
 	struct dc_stream_state *stream = NULL;
 	struct drm_display_mode mode;
@@ -1597,22 +1595,17 @@ create_stream_for_sink(struct drm_connector *connector,
 	stream->timing.flags.LTE_340MCSC_SCRAMBLE =
 		connector->display_info.hdmi.scdc.scrambling.low_rates;
 
-	list_for_each_entry(connector_mode, &connector->modes, head) {
-		/* Search for preferred mode */
-		if (connector_mode->type & DRM_MODE_TYPE_PREFERRED) {
-			preferred_mode = connector_mode;
-			break;
-		}
-	}
-	if (!preferred_mode)
-		preferred_mode = list_first_entry_or_null(
-				&connector->modes,
-				struct drm_display_mode,
-				head);
+	/*
+	 * From mode_valid this is the previous probe's copy, which matches what
+	 * connector->modes held there: stale modes are pruned only after
+	 * validation, and new ones get crtc timings only after the probe
+	 */
+	if (aconnector && aconnector->preferred_mode.clock)
+		preferred_mode = &aconnector->preferred_mode;
 
 	mode_refresh = drm_mode_vrefresh(&mode);
 
-	if (preferred_mode == NULL) {
+	if (aconnector && !preferred_mode) {
 		/*
 		 * This may not be an error, the use case is when we have no
 		 * usermode calls to reset and set mode upon hotplug. In this
@@ -1620,7 +1613,7 @@ create_stream_for_sink(struct drm_connector *connector,
 		 * and the modelist may not be filled in time.
 		 */
 		drm_dbg_driver(dev, "No preferred mode found\n");
-	} else if (aconnector) {
+	} else if (preferred_mode) {
 		recalculate_timing = amdgpu_freesync_vid_mode &&
 				 amdgpu_dm_is_freesync_video_mode(&mode, aconnector);
 		if (recalculate_timing) {
