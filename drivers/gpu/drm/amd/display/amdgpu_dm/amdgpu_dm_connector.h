@@ -34,6 +34,7 @@ struct amdgpu_encoder;
 struct amdgpu_i2c_adapter;
 struct dc_crtc_timing;
 struct dc_link;
+struct dc_sink;
 enum signal_type;
 struct dc_state;
 struct dc_stream_state;
@@ -124,7 +125,8 @@ void amdgpu_dm_update_stream_scaling_settings(struct drm_device *dev,
 				    struct dc_stream_state *stream);
 
 bool amdgpu_dm_is_freesync_video_mode(const struct drm_display_mode *mode,
-			    struct amdgpu_dm_connector *aconnector);
+			    struct amdgpu_dm_connector *aconnector,
+			    const struct dc_sink *sink);
 
 int amdgpu_dm_fill_hdr_info_packet(const struct drm_connector_state *state,
 			 struct dc_info_packet *out);
@@ -135,7 +137,7 @@ amdgpu_dm_get_output_color_space(const struct dc_crtc_timing *dc_crtc_timing,
 
 struct drm_display_mode *
 amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
-			      bool use_probed_modes);
+			      bool use_probed_modes, const struct dc_sink *sink);
 
 struct amdgpu_i2c_adapter *
 amdgpu_dm_create_i2c(struct ddc_service *ddc_service, bool oem);
@@ -191,6 +193,7 @@ void fill_stream_properties_from_drm_display_mode(
 	struct dc_stream_state *stream,
 	const struct drm_display_mode *mode_in,
 	const struct drm_connector *connector,
+	const struct dc_sink *sink,
 	const struct drm_connector_state *connector_state,
 	const struct dc_stream_state *old_stream,
 	int requested_bpc,
@@ -206,8 +209,7 @@ create_stream_for_sink(struct drm_connector *connector,
 		       enum dc_pixel_encoding requested_encoding,
 		       bool is_hdmi_ep);
 const struct drm_display_mode *
-amdgpu_dm_connector_preferred_mode(struct drm_connector *connector,
-				   struct drm_display_mode *native);
+amdgpu_dm_connector_preferred_mode(struct drm_connector *connector);
 enum drm_connector_status
 amdgpu_dm_connector_poll(struct amdgpu_dm_connector *aconnector, bool force);
 enum drm_connector_status

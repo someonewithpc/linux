@@ -2393,6 +2393,24 @@ static void dm_test_get_property_unknown(struct kunit *test)
 				other, &val), -EINVAL);
 }
 
+/*
+ * A sink with an EDID, recorded as the sink the mode copies came from, as
+ * amdgpu_dm_connector_copy_probed_modes() records it
+ */
+static struct dc_sink *dm_test_copies_sink(struct kunit *test,
+					   struct amdgpu_dm_connector *aconnector)
+{
+	struct dc_sink *sink = kunit_kzalloc(test, sizeof(*sink), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	memset(sink->dc_edid.raw_edid, 0x5a, 128);
+	sink->dc_edid.length = 128;
+	aconnector->mode_copies_edid_len = 128;
+	memcpy(aconnector->mode_copies_edid, sink->dc_edid.raw_edid, 128);
+
+	return sink;
+}
+
 /* Tests for amdgpu_dm_get_highest_refresh_rate_mode() */
 
 /**
@@ -2407,7 +2425,7 @@ static void dm_test_highest_refresh_writeback_null(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, aconnector);
 
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_WRITEBACK;
-	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false));
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, NULL));
 }
 
 /**
@@ -2417,6 +2435,7 @@ static void dm_test_highest_refresh_writeback_null(struct kunit *test)
 static void dm_test_highest_refresh_cached_base(struct kunit *test)
 {
 	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
 
 	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, aconnector);
@@ -2424,13 +2443,18 @@ static void dm_test_highest_refresh_cached_base(struct kunit *test)
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
 	aconnector->freesync_vid_base.clock = 148500;
 
-	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
+	sink = dm_test_copies_sink(test, aconnector);
+
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, sink),
 			    &aconnector->freesync_vid_base);
 }
 
 /**
  * dm_test_highest_refresh_preferred_mode - Test preferred mode is selected
  * @test: The KUnit test context
+ *
+ * With no copy taken yet, the probe path picks the preferred mode from
+ * probed_modes and leaves the copy alone
  */
 static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 {
@@ -2444,6 +2468,84 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
 	INIT_LIST_HEAD(&aconnector->base.modes);
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+
+	mode->type = DRM_MODE_TYPE_PREFERRED;
+	mode->clock = 148500;
+	mode->hdisplay = 1920;
+	mode->vdisplay = 1080;
+	mode->htotal = 2200;
+	mode->vtotal = 1125;
+	list_add_tail(&mode->head, &aconnector->base.probed_modes);
+
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true, NULL),
+			    mode);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
+}
+
+/**
+ * dm_test_highest_refresh_probed_over_copy - Test a probe ignores the previous copy
+ * @test: The KUnit test context
+ *
+ * The copy comes from the previous probe, which may have seen another sink.
+ * While probed_modes has modes, the probe path picks from them instead
+ */
+static void dm_test_highest_refresh_probed_over_copy(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+	aconnector->freesync_vid_base.clock = 74250;
+	aconnector->freesync_vid_base.hdisplay = 1280;
+	aconnector->freesync_vid_base.vdisplay = 720;
+
+	mode->clock = 148500;
+	mode->hdisplay = 1920;
+	mode->vdisplay = 1080;
+	mode->htotal = 2200;
+	mode->vtotal = 1125;
+	list_add_tail(&mode->head, &aconnector->base.probed_modes);
+
+	aconnector->dc_sink = dm_test_copies_sink(test, aconnector);
+
+	KUNIT_EXPECT_PTR_EQ(test,
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true,
+								    aconnector->dc_sink),
+			    mode);
+	KUNIT_EXPECT_PTR_EQ(test,
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false,
+								    aconnector->dc_sink),
+			    &aconnector->freesync_vid_base);
+}
+
+/**
+ * dm_test_highest_refresh_skips_modes - Test atomic_check callers never walk base.modes
+ * @test: The KUnit test context
+ *
+ * base.modes needs &drm_mode_config.mutex, which atomic_check doesn't hold.
+ * Without a copy the lookup returns NULL, even though base.modes has a mode
+ */
+static void dm_test_highest_refresh_skips_modes(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
 
 	mode->type = DRM_MODE_TYPE_PREFERRED;
 	mode->clock = 148500;
@@ -2453,8 +2555,63 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 	mode->vtotal = 1125;
 	list_add_tail(&mode->head, &aconnector->base.modes);
 
-	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
-			    mode);
+	sink = dm_test_copies_sink(test, aconnector);
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, sink));
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
+}
+
+/**
+ * dm_test_highest_refresh_other_sink - Test a copy from another sink is ignored
+ * @test: The KUnit test context
+ *
+ * After a monitor swap the copy describes the previous monitor until the next
+ * probe, so a sink with another EDID, or with none, gets no freesync base. A
+ * new sink with the same EDID, as after a replug, keeps it
+ */
+static void dm_test_highest_refresh_other_sink(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+	struct dc_sink *probed, *other, *replugged, *no_edid;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, other);
+	replugged = kunit_kzalloc(test, sizeof(*replugged), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, replugged);
+	no_edid = kunit_kzalloc(test, sizeof(*no_edid), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, no_edid);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+	aconnector->freesync_vid_base.clock = 148500;
+	aconnector->freesync_vid_base.hdisplay = 1920;
+	aconnector->freesync_vid_base.vdisplay = 1080;
+	aconnector->freesync_vid_base.htotal = 2200;
+	aconnector->freesync_vid_base.vtotal = 1125;
+	drm_mode_copy(mode, &aconnector->freesync_vid_base);
+
+	probed = dm_test_copies_sink(test, aconnector);
+	replugged->dc_edid = probed->dc_edid;
+	other->dc_edid = probed->dc_edid;
+	other->dc_edid.raw_edid[12]++;
+
+	KUNIT_EXPECT_PTR_EQ(test,
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, probed),
+			    &aconnector->freesync_vid_base);
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_is_freesync_video_mode(mode, aconnector, probed));
+	KUNIT_EXPECT_PTR_EQ(test,
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, replugged),
+			    &aconnector->freesync_vid_base);
+
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, other));
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(mode, aconnector, other));
+	KUNIT_EXPECT_NULL(test,
+			  amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, no_edid));
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, NULL));
 }
 
 /* Tests for amdgpu_dm_connector_copy_probed_modes() */
@@ -2528,7 +2685,7 @@ static void dm_test_highest_refresh_probed_skips_copy(struct kunit *test)
 				     2720, 1481, 241500, DRM_MODE_TYPE_PREFERRED);
 
 	KUNIT_EXPECT_PTR_EQ(test,
-			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true),
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true, NULL),
 			    mode);
 }
 
@@ -2847,6 +3004,7 @@ static void dm_test_fill_modes_copies_probe(struct kunit *test)
 static void dm_test_is_freesync_video_mode_null_mode(struct kunit *test)
 {
 	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
 
 	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, aconnector);
@@ -2854,7 +3012,8 @@ static void dm_test_is_freesync_video_mode_null_mode(struct kunit *test)
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
 	aconnector->freesync_vid_base.clock = 148500;
 
-	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(NULL, aconnector));
+	sink = dm_test_copies_sink(test, aconnector);
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(NULL, aconnector, sink));
 }
 
 /**
@@ -2864,6 +3023,7 @@ static void dm_test_is_freesync_video_mode_null_mode(struct kunit *test)
 static void dm_test_is_freesync_video_mode_match(struct kunit *test)
 {
 	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
 	struct drm_display_mode candidate = {};
 
 	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
@@ -2891,7 +3051,8 @@ static void dm_test_is_freesync_video_mode_match(struct kunit *test)
 	candidate.vsync_end = 1089;
 	candidate.vtotal = 1125;
 
-	KUNIT_EXPECT_TRUE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector));
+	sink = dm_test_copies_sink(test, aconnector);
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector, sink));
 }
 
 /**
@@ -2901,6 +3062,7 @@ static void dm_test_is_freesync_video_mode_match(struct kunit *test)
 static void dm_test_is_freesync_video_mode_no_match(struct kunit *test)
 {
 	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
 	struct drm_display_mode candidate = {};
 
 	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
@@ -2920,7 +3082,8 @@ static void dm_test_is_freesync_video_mode_no_match(struct kunit *test)
 	candidate.htotal = 1650;
 	candidate.vtotal = 750;
 
-	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector));
+	sink = dm_test_copies_sink(test, aconnector);
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector, sink));
 }
 
 /* Tests for amdgpu_dm_update_cacp_caps() */
@@ -4187,7 +4350,7 @@ static void dm_test_fill_stream_borders_zeroed(struct kunit *test)
 	timing->v_border_bottom = 8;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->h_border_left, 0);
@@ -4209,7 +4372,7 @@ static void dm_test_fill_stream_rgb_defaults(struct kunit *test)
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding, (int)PIXEL_ENCODING_RGB);
@@ -4236,7 +4399,7 @@ static void dm_test_fill_stream_sync_polarity_positive(struct kunit *test)
 	ctx->mode->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->flags.HSYNC_POSITIVE_POLARITY, 1);
@@ -4256,7 +4419,7 @@ static void dm_test_fill_stream_sync_polarity_negative(struct kunit *test)
 	ctx->mode->flags = 0;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->flags.HSYNC_POSITIVE_POLARITY, 0);
@@ -4286,7 +4449,7 @@ static void dm_test_fill_stream_inherits_old_stream(struct kunit *test)
 	ctx->mode->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, old_stream, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, old_stream, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->vic, 16);
@@ -4317,7 +4480,7 @@ static void dm_test_fill_stream_timing_from_crtc(struct kunit *test)
 	ctx->mode->crtc_clock = 148500;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->h_addressable, 1920);
@@ -4345,7 +4508,7 @@ static void dm_test_fill_stream_color_depth_requested_bpc(struct kunit *test)
 	ctx->aconnector->base.display_info.bpc = 12;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 10,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 10,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->display_color_depth,
@@ -4363,7 +4526,7 @@ static void dm_test_fill_stream_content_type(struct kunit *test)
 	ctx->conn_state->content_type = DRM_MODE_CONTENT_TYPE_GRAPHICS;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)ctx->stream->content_type,
@@ -4382,7 +4545,7 @@ static void dm_test_fill_stream_aspect_ratio(struct kunit *test)
 	ctx->mode->picture_aspect_ratio = HDMI_PICTURE_ASPECT_16_9;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->aspect_ratio,
@@ -4403,7 +4566,7 @@ static void dm_test_fill_stream_encoding_from_caller_ycbcr420(struct kunit *test
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_YCBCR420, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding,
@@ -4422,7 +4585,7 @@ static void dm_test_fill_stream_encoding_from_caller_ycbcr422(struct kunit *test
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_YCBCR422, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding,
@@ -4441,7 +4604,7 @@ static void dm_test_fill_stream_encoding_from_caller_ycbcr444(struct kunit *test
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_YCBCR444, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding,
@@ -4466,7 +4629,7 @@ static void dm_test_fill_stream_hdmi_ep_clamps_depth(struct kunit *test)
 	ctx->mode->crtc_clock = 148500;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 10,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 10,
 		PIXEL_ENCODING_RGB, true);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->display_color_depth,
@@ -4490,7 +4653,7 @@ static void dm_test_fill_stream_non_hdmi_ep_keeps_depth(struct kunit *test)
 	ctx->mode->crtc_clock = 148500;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 10,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 10,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->display_color_depth,
@@ -4524,7 +4687,7 @@ static void dm_test_fill_stream_hdmi_infoframe(struct kunit *test)
 	ctx->stream->signal = SIGNAL_TYPE_HDMI_TYPE_A;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, old_stream, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, old_stream, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	/* The HDMI block overwrote the old stream's VIC of 99 with the AVI code. */
@@ -4535,13 +4698,15 @@ static void dm_test_fill_stream_hdmi_infoframe(struct kunit *test)
  * dm_test_fill_stream_freesync_video - Test timing taken from the mode for FS video
  * @test: The KUnit test context
  *
- * When the mode matches the connector's cached freesync base mode the timing is
- * taken from the drm mode fields (not crtc_*), including a 10x pixel clock.
+ * When the mode matches the connector's cached freesync base mode, taken from
+ * a probe of the sink passed in, the timing is taken from the drm mode fields
+ * (not crtc_*), including a 10x pixel clock.
  */
 static void dm_test_fill_stream_freesync_video(struct kunit *test)
 {
 	struct dm_test_fill_ctx *ctx = dm_test_fill_ctx_alloc(test);
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
+	struct dc_sink *sink = dm_test_copies_sink(test, ctx->aconnector);
 
 	/* Cached high mode == the mode passed in => freesync video mode. */
 	ctx->aconnector->freesync_vid_base.clock = 148500;
@@ -4565,7 +4730,7 @@ static void dm_test_fill_stream_freesync_video(struct kunit *test)
 	ctx->mode->vtotal = 1125;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, sink, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->h_addressable, 1920);
@@ -4755,7 +4920,43 @@ static void dm_test_create_stream_existing_sink(struct kunit *test)
 	dc_sink_release(sink);
 }
 
-/* Append a copy of the context mode to the connector's mode list. */
+static void dm_test_release_sink(void *sink)
+{
+	dc_sink_release(sink);
+}
+
+/*
+ * Attach a sink with an EDID on @link to @aconnector, as a detect would, and
+ * record it as the sink the mode copies came from. The sink is released when
+ * the test ends
+ */
+static struct dc_sink *dm_test_attach_copies_sink(struct kunit *test,
+						  struct amdgpu_dm_connector *aconnector,
+						  struct dc_link *link)
+{
+	struct dc_sink_init_data init = {
+		.link = link,
+		.sink_signal = link->connector_signal,
+	};
+	struct dc_sink *sink = dc_sink_create(&init);
+
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, dm_test_release_sink, sink), 0);
+	sink->sink_signal = SIGNAL_TYPE_VIRTUAL;
+	memset(sink->dc_edid.raw_edid, 0x5a, 128);
+	sink->dc_edid.length = 128;
+
+	aconnector->dc_sink = sink;
+	aconnector->mode_copies_edid_len = 128;
+	memcpy(aconnector->mode_copies_edid, sink->dc_edid.raw_edid, 128);
+
+	return sink;
+}
+
+/*
+ * Append a copy of the context mode to the connector's mode list and take the
+ * copies that amdgpu_dm_connector_fill_modes() takes after a probe
+ */
 static void dm_test_stream_add_mode(struct kunit *test, struct dm_test_stream_ctx *ctx,
 				    u32 type)
 {
@@ -4765,6 +4966,9 @@ static void dm_test_stream_add_mode(struct kunit *test, struct dm_test_stream_ct
 	drm_mode_copy(mode, ctx->mode);
 	mode->type = type;
 	list_add_tail(&mode->head, &ctx->aconnector->base.modes);
+	if (!ctx->aconnector->dc_sink)
+		dm_test_attach_copies_sink(test, ctx->aconnector, ctx->link);
+	dm_test_copy_locked(test, ctx->aconnector);
 }
 
 /* Give the context mode a full set of CRTC timings. */
@@ -4812,9 +5016,7 @@ static void dm_test_create_stream_preferred_mode(struct kunit *test)
 	dm_test_stream_add_mode(test, ctx, DRM_MODE_TYPE_PREFERRED);
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					list_first_entry(&ctx->aconnector->base.modes,
-							 struct drm_display_mode, head),
-					ctx->dm_state, NULL, 8,
+					&ctx->aconnector->preferred_mode, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4842,9 +5044,7 @@ static void dm_test_create_stream_scaled_keeps_refresh(struct kunit *test)
 	ctx->dm_state->scaling = RMX_FULL;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					list_first_entry(&ctx->aconnector->base.modes,
-							 struct drm_display_mode, head),
-					ctx->dm_state, NULL, 8,
+					&ctx->aconnector->preferred_mode, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4994,8 +5194,8 @@ dm_test_native_mode_stream(struct kunit *test, int connector_type, unsigned int 
 	static const u8 edid[EDID_LENGTH];
 	struct dm_test_stream_ctx *ctx = dm_test_stream_ctx_alloc_type(test, connector_type);
 	struct amdgpu_encoder *aenc;
-	struct drm_display_mode *native, native_buf;
 	struct dc_stream_state *stream;
+	struct drm_display_mode *native;
 
 	aenc = drmm_kzalloc(ctx->drm, sizeof(*aenc), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, aenc);
@@ -5013,8 +5213,6 @@ dm_test_native_mode_stream(struct kunit *test, int connector_type, unsigned int 
 	native->vsync_start = 2403;
 	native->vsync_end = 2409;
 	native->vtotal = 2469;
-	/* Cached by the first, unlimited probe */
-	drm_mode_copy(&ctx->aconnector->freesync_vid_base, native);
 
 	drm_mode_copy(ctx->mode, native);
 	ctx->mode->hdisplay = 1920;
@@ -5042,10 +5240,10 @@ dm_test_native_mode_stream(struct kunit *test, int connector_type, unsigned int 
 		ctx->aconnector->drm_edid = drm_edid_alloc(edid, sizeof(edid));
 		KUNIT_ASSERT_NOT_NULL(test, ctx->aconnector->drm_edid);
 	}
+	dm_test_copy_locked(test, ctx->aconnector);
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					amdgpu_dm_connector_preferred_mode(&ctx->aconnector->base,
-									   &native_buf),
+					&ctx->aconnector->preferred_mode,
 					ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
@@ -6788,7 +6986,8 @@ static void dm_test_add_fs_modes_no_preferred_mode(struct kunit *test)
 
 /*
  * Build a DisplayPort connector whose highest-refresh mode is a fixed
- * 1920x1080@60 timing. A non-zero freesync_vid_base.clock makes
+ * 1920x1080@60 timing. While probed_modes is empty, a non-zero
+ * freesync_vid_base.clock taken from the connector's dc_sink makes
  * amdgpu_dm_get_highest_refresh_rate_mode() return that timing directly,
  * giving the test full control of the reference mode.
  */
@@ -6806,6 +7005,7 @@ static struct amdgpu_dm_connector *dm_test_fs_setup(struct kunit *test)
 	m->vsync_start = 1084;
 	m->vsync_end = 1089;
 	m->vtotal = 1125;
+	aconnector->dc_sink = dm_test_copies_sink(test, aconnector);
 
 	return aconnector;
 }
@@ -7539,6 +7739,24 @@ static void dm_test_create_validate_stream_null_dm_state(struct kunit *test)
 
 /* Tests for amdgpu_dm_create_validate_stream_for_sink() */
 
+/* atomic_check holds connection_mutex for every connector it validates */
+static struct dc_stream_state *
+dm_test_validate_locked(struct drm_connector *connector,
+			const struct drm_display_mode *drm_mode,
+			const struct dm_connector_state *dm_state,
+			const struct dc_stream_state *old_stream)
+{
+	struct drm_modeset_lock *lock = &connector->dev->mode_config.connection_mutex;
+	struct dc_stream_state *stream;
+
+	drm_modeset_lock(lock, NULL);
+	stream = amdgpu_dm_create_validate_stream_for_sink(connector, drm_mode,
+							   dm_state, old_stream);
+	drm_modeset_unlock(lock);
+
+	return stream;
+}
+
 /*
  * Build a connector embedded in an amdgpu_device (so drm_to_adev() resolves)
  * carrying a dc_link but a deliberately low atomic-requested bpc. Every
@@ -7674,16 +7892,16 @@ static void dm_test_create_validate_stream_no_valid_bpc(struct kunit *test)
 
 	ctx->link->connector_signal = SIGNAL_TYPE_DISPLAY_PORT;
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(&ctx->aconnector->base,
-							   ctx->mode,
-							   ctx->dm_state, NULL);
+	stream = dm_test_validate_locked(&ctx->aconnector->base,
+					 ctx->mode,
+					 ctx->dm_state, NULL);
 	KUNIT_EXPECT_NULL(test, stream);
 
 	/* Same result when the sink-reported bpc is the limiting cap. */
 	ctx->dm_state->base.max_requested_bpc = 16;
 	ctx->aconnector->base.display_info.bpc = 4;
-	stream = amdgpu_dm_create_validate_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-							   ctx->dm_state, NULL);
+	stream = dm_test_validate_locked(&ctx->aconnector->base, ctx->mode,
+					 ctx->dm_state, NULL);
 	KUNIT_EXPECT_NULL(test, stream);
 }
 
@@ -7708,9 +7926,9 @@ static void dm_test_create_validate_stream_hdmi_ycbcr(struct kunit *test)
 		BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422);
 	dm_test_set_420_also_mode(test, ctx->drm, &ctx->aconnector->base, ctx->mode);
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(&ctx->aconnector->base,
-							   ctx->mode,
-							   ctx->dm_state, NULL);
+	stream = dm_test_validate_locked(&ctx->aconnector->base,
+					 ctx->mode,
+					 ctx->dm_state, NULL);
 	KUNIT_EXPECT_NULL(test, stream);
 }
 
@@ -7730,9 +7948,9 @@ static void dm_test_create_validate_stream_force_ycbcr420(struct kunit *test)
 	ctx->link->connector_signal = SIGNAL_TYPE_DISPLAY_PORT;
 	ctx->aconnector->force_yuv_pixel_format = PIXEL_ENCODING_YCBCR420;
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(&ctx->aconnector->base,
-							   ctx->mode,
-							   ctx->dm_state, NULL);
+	stream = dm_test_validate_locked(&ctx->aconnector->base,
+					 ctx->mode,
+					 ctx->dm_state, NULL);
 	KUNIT_EXPECT_NULL(test, stream);
 }
 
@@ -7755,9 +7973,9 @@ static void dm_test_create_validate_stream_force_ycbcr422(struct kunit *test)
 	ctx->aconnector->base.display_info.color_formats =
 		BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422);
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(&ctx->aconnector->base,
-							   ctx->mode,
-							   ctx->dm_state, NULL);
+	stream = dm_test_validate_locked(&ctx->aconnector->base,
+					 ctx->mode,
+					 ctx->dm_state, NULL);
 	KUNIT_EXPECT_NULL(test, stream);
 }
 
@@ -7780,9 +7998,9 @@ static void dm_test_create_validate_stream_force_ycbcr444(struct kunit *test)
 	ctx->aconnector->base.display_info.color_formats =
 		BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444);
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(&ctx->aconnector->base,
-							   ctx->mode,
-							   ctx->dm_state, NULL);
+	stream = dm_test_validate_locked(&ctx->aconnector->base,
+					 ctx->mode,
+					 ctx->dm_state, NULL);
 	KUNIT_EXPECT_NULL(test, stream);
 }
 
@@ -7929,10 +8147,10 @@ static void dm_test_create_validate_stream_prune_timing(struct kunit *test)
 	c->tgfuncs->validate_timing = dm_test_cvs_validate_timing_fail;
 
 	KUNIT_EXPECT_NULL(test,
-			  amdgpu_dm_create_validate_stream_for_sink(&c->aconnector->base,
-								    c->mode,
-								    c->dm_state,
-								    NULL));
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
 }
 
 /**
@@ -7951,10 +8169,10 @@ static void dm_test_create_validate_stream_prune_context(struct kunit *test)
 	c->link_srv->validate_mode_timing = dm_test_cvs_validate_mode_timing_ok;
 
 	KUNIT_EXPECT_NULL(test,
-			  amdgpu_dm_create_validate_stream_for_sink(&c->aconnector->base,
-								    c->mode,
-								    c->dm_state,
-								    NULL));
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
 }
 
 static enum dc_pixel_encoding dm_test_cvs_first_encoding;
@@ -7983,10 +8201,10 @@ static void dm_test_create_validate_stream_hdmi_rgb_first(struct kunit *test)
 	dm_test_cvs_first_encoding = PIXEL_ENCODING_UNDEFINED;
 
 	KUNIT_EXPECT_NULL(test,
-			  amdgpu_dm_create_validate_stream_for_sink(&c->aconnector->base,
-								    c->mode,
-								    c->dm_state,
-								    NULL));
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
 	KUNIT_EXPECT_EQ(test, (int)dm_test_cvs_first_encoding, (int)PIXEL_ENCODING_RGB);
 }
 
@@ -8001,15 +8219,13 @@ static bool dm_test_cvs_record_first_h_addressable(struct timing_generator *tg,
 	return false;
 }
 
-/*
- * A 3840x2160 preferred mode in connector->modes, as a probe of another sink
- * leaves it until the next probe prunes it
- */
-static void dm_test_cvs_add_preferred_4k(struct kunit *test, struct dm_test_cvs_dc *c)
+/* A 3840x2160 preferred mode copy, taken from a probe of the connector's sink */
+static void dm_test_cvs_set_preferred_copy(struct kunit *test, struct dm_test_cvs_dc *c)
 {
-	struct drm_display_mode *pref = drm_mode_create(c->drm);
+	struct drm_display_mode *pref = &c->aconnector->preferred_mode;
 
-	KUNIT_ASSERT_NOT_NULL(test, pref);
+	dm_test_attach_copies_sink(test, c->aconnector, c->link);
+
 	pref->hdisplay = 3840;
 	pref->hsync_start = 4016;
 	pref->hsync_end = 4104;
@@ -8021,42 +8237,69 @@ static void dm_test_cvs_add_preferred_4k(struct kunit *test, struct dm_test_cvs_
 	pref->clock = 594000;
 	pref->type = DRM_MODE_TYPE_PREFERRED;
 	drm_mode_set_crtcinfo(pref, CRTC_INTERLACE_HALVE_V);
-	list_add_tail(&pref->head, &c->aconnector->base.modes);
 }
 
 /**
- * dm_test_create_validate_stream_scaled_preferred - Test atomic_check scales to the preferred mode
+ * dm_test_create_validate_stream_scaled_copy - Test atomic_check scales to the copy
  * @test: The KUnit test context
  *
  * With scaling on, the stream for a 1920x1080 mode takes the CRTC timing of
- * the preferred mode in connector->modes
+ * the preferred mode copy
  */
-static void dm_test_create_validate_stream_scaled_preferred(struct kunit *test)
+static void dm_test_create_validate_stream_scaled_copy(struct kunit *test)
 {
 	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
 
 	c->dm_state->scaling = RMX_FULL;
-	dm_test_cvs_add_preferred_4k(test, c);
+	dm_test_cvs_set_preferred_copy(test, c);
 	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
 	dm_test_cvs_first_h_addressable = 0;
 
 	KUNIT_EXPECT_NULL(test,
-			  amdgpu_dm_create_validate_stream_for_sink(&c->aconnector->base,
-								    c->mode,
-								    c->dm_state,
-								    NULL));
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
 	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 3840);
 }
 
 /**
- * dm_test_mode_valid_ignores_preferred_mode - Test mode_valid uses the mode's own timing
+ * dm_test_create_validate_stream_stale_copy - Test atomic_check ignores a stale copy
  * @test: The KUnit test context
  *
- * During a probe connector->modes still holds the previous sink's preferred
- * mode. Even with scaling on, the mode is validated with its own 1920x1080
- * timing rather than that mode's 3840x2160 one
+ * After a monitor swap the connector has a sink with another EDID, and the
+ * copy describes the previous monitor. Its timing must not be applied, even
+ * with scaling on
  */
-static void dm_test_mode_valid_ignores_preferred_mode(struct kunit *test)
+static void dm_test_create_validate_stream_stale_copy(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
+
+	/* drm_mode_convert_umode() fills in the CRTC timing of atomic modes */
+	drm_mode_set_crtcinfo(c->mode, CRTC_INTERLACE_HALVE_V);
+	c->dm_state->scaling = RMX_FULL;
+	dm_test_cvs_set_preferred_copy(test, c);
+	c->aconnector->dc_sink->dc_edid.raw_edid[12]++;
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
+	dm_test_cvs_first_h_addressable = 0;
+
+	KUNIT_EXPECT_NULL(test,
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 1920);
+}
+
+/**
+ * dm_test_mode_valid_ignores_preferred_copy - Test mode_valid uses the mode's own timing
+ * @test: The KUnit test context
+ *
+ * mode_valid runs inside a probe, before the copy is refreshed, so the copy
+ * may come from another sink. Even with scaling on, the mode is validated
+ * with its own 1920x1080 timing rather than the copy's 3840x2160 one
+ */
+static void dm_test_mode_valid_ignores_preferred_copy(struct kunit *test)
 {
 	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
 	struct dc_sink *em_sink;
@@ -8072,7 +8315,7 @@ static void dm_test_mode_valid_ignores_preferred_mode(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, c->aconnector->base.state);
 	to_dm_connector_state(c->aconnector->base.state)->scaling = RMX_FULL;
 
-	dm_test_cvs_add_preferred_4k(test, c);
+	dm_test_cvs_set_preferred_copy(test, c);
 	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
 	dm_test_cvs_first_h_addressable = 0;
 
@@ -11082,6 +11325,9 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_highest_refresh_cached_base),
 	KUNIT_CASE(dm_test_highest_refresh_preferred_mode),
 	KUNIT_CASE(dm_test_highest_refresh_probed_skips_copy),
+	KUNIT_CASE(dm_test_highest_refresh_probed_over_copy),
+	KUNIT_CASE(dm_test_highest_refresh_skips_modes),
+	KUNIT_CASE(dm_test_highest_refresh_other_sink),
 	/* amdgpu_dm_connector_copy_probed_modes */
 	KUNIT_CASE(dm_test_copy_probed_modes_highest_refresh),
 	KUNIT_CASE(dm_test_copy_probed_modes_no_preferred),
@@ -11313,8 +11559,9 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_validate_stream_prune_timing),
 	KUNIT_CASE(dm_test_create_validate_stream_prune_context),
 	KUNIT_CASE(dm_test_create_validate_stream_hdmi_rgb_first),
-	KUNIT_CASE(dm_test_create_validate_stream_scaled_preferred),
-	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_mode),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_copy),
+	KUNIT_CASE(dm_test_create_validate_stream_stale_copy),
+	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_copy),
 	/* amdgpu_dm_update_connector_after_detect */
 	KUNIT_CASE(dm_test_update_after_detect_mst_noop),
 	KUNIT_CASE(dm_test_update_after_detect_sink_unchanged),

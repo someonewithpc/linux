@@ -879,6 +879,7 @@ STATIC_IFN_KUNIT void fill_stream_properties_from_drm_display_mode(
 	struct dc_stream_state *stream,
 	const struct drm_display_mode *mode_in,
 	const struct drm_connector *connector,
+	const struct dc_sink *sink,
 	const struct drm_connector_state *connector_state,
 	const struct dc_stream_state *old_stream,
 	int requested_bpc,
@@ -949,7 +950,7 @@ STATIC_IFN_KUNIT void fill_stream_properties_from_drm_display_mode(
 		timing_out->hdmi_vic = hv_frame.vic;
 	}
 
-	if (aconnector && amdgpu_dm_is_freesync_video_mode(mode_in, aconnector)) {
+	if (aconnector && amdgpu_dm_is_freesync_video_mode(mode_in, aconnector, sink)) {
 		timing_out->h_addressable = mode_in->hdisplay;
 		timing_out->h_total = mode_in->htotal;
 		timing_out->h_sync_width = mode_in->hsync_end - mode_in->hsync_start;
@@ -1170,6 +1171,22 @@ static bool amdgpu_dm_fs_modes_base_listed(struct list_head *modes,
 	return false;
 }
 
+/*
+ * Whether the mode copies were taken from a probe of @sink, or of a sink with
+ * the same EDID, as after a replug of the same monitor. A sink without EDID
+ * never matches, since nothing tells two of them apart. A hotplug can swap
+ * dc_sink while atomic_check runs, so atomic_check passes the sink of the
+ * stream it builds or checks rather than reading dc_sink again
+ */
+static bool amdgpu_dm_mode_copies_match(const struct amdgpu_dm_connector *aconnector,
+					const struct dc_sink *sink)
+{
+	u32 len = amdgpu_dm_sink_edid_len(sink);
+
+	return len && len == aconnector->mode_copies_edid_len &&
+	       !memcmp(sink->dc_edid.raw_edid, aconnector->mode_copies_edid, len);
+}
+
 /**
  * DOC: FreeSync Video
  *
@@ -1202,45 +1219,50 @@ static bool amdgpu_dm_fs_modes_base_listed(struct list_head *modes,
  */
 struct drm_display_mode *
 amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
-		bool use_probed_modes)
+		bool use_probed_modes, const struct dc_sink *sink)
 {
+	struct list_head *probed = &aconnector->base.probed_modes;
 	struct drm_display_mode *m_pref;
-	struct list_head *list_head = use_probed_modes ?
-		&aconnector->base.probed_modes :
-		&aconnector->base.modes;
 
 	if (aconnector->base.connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
 		return NULL;
 
 	/*
-	 * A probe reads its own probed_modes, not the copy of the last one. The
-	 * copy stands in while probed_modes is empty
+	 * Callers that pass use_probed_modes hold &drm_mode_config.mutex, which
+	 * protects probed_modes and is enough to read the copy. During a probe
+	 * probed_modes holds the modes found so far, which the copy from the
+	 * previous probe may not match
 	 */
-	if (aconnector->freesync_vid_base.clock != 0 &&
-	    !(use_probed_modes && !list_empty(list_head)))
-		return &aconnector->freesync_vid_base;
-
-	m_pref = amdgpu_dm_find_preferred_mode(list_head);
-	if (!m_pref) {
+	if (use_probed_modes && !list_empty(probed)) {
+		m_pref = amdgpu_dm_find_preferred_mode(probed);
 		/* Probably an EDID with no preferred mode. Fallback to first entry */
-		m_pref = list_first_entry_or_null(list_head, struct drm_display_mode, head);
-		if (!m_pref) {
-			drm_dbg_driver(aconnector->base.dev, "No preferred mode found in EDID\n");
-			return NULL;
-		}
+		if (!m_pref)
+			m_pref = list_first_entry(probed, struct drm_display_mode, head);
+
+		return amdgpu_dm_find_highest_refresh_mode(probed, m_pref);
 	}
 
-	return amdgpu_dm_find_highest_refresh_mode(list_head, m_pref);
+	/*
+	 * atomic_check can't take that lock, so it reads only the copy, and only
+	 * for the sink it was taken from. Every caller holds connection_mutex or
+	 * &drm_mode_config.mutex, so the copy doesn't change under it
+	 */
+	if (aconnector->freesync_vid_base.clock != 0 &&
+	    amdgpu_dm_mode_copies_match(aconnector, sink))
+		return &aconnector->freesync_vid_base;
+
+	return NULL;
 }
 EXPORT_IF_KUNIT(amdgpu_dm_get_highest_refresh_rate_mode);
 
 bool amdgpu_dm_is_freesync_video_mode(const struct drm_display_mode *mode,
-		struct amdgpu_dm_connector *aconnector)
+		struct amdgpu_dm_connector *aconnector,
+		const struct dc_sink *sink)
 {
 	struct drm_display_mode *high_mode;
 	int timing_diff;
 
-	high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false);
+	high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, sink);
 	if (!high_mode || !mode)
 		return false;
 
@@ -1719,11 +1741,24 @@ create_stream_for_sink(struct drm_connector *connector,
 
 	mode_refresh = drm_mode_vrefresh(&mode);
 
+	/*
+	 * After a monitor swap the copies describe the previous monitor until
+	 * the next probe. Check them against the sink this stream is for, which
+	 * a hotplug may swap at any time since atomic_check doesn't hold
+	 * &drm_mode_config.mutex
+	 */
+	if (aconnector && preferred_mode && !amdgpu_dm_mode_copies_match(aconnector, sink)) {
+		drm_dbg_driver(dev, "Preferred mode copy is from another sink\n");
+		preferred_mode = NULL;
+	}
+
 	if (aconnector && preferred_mode) {
-		recalculate_timing = amdgpu_freesync_vid_mode &&
-				 amdgpu_dm_is_freesync_video_mode(&mode, aconnector);
-		if (recalculate_timing) {
-			freesync_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false);
+		if (amdgpu_freesync_vid_mode &&
+		    amdgpu_dm_is_freesync_video_mode(&mode, aconnector, sink))
+			freesync_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector,
+										false, sink);
+		if (freesync_mode) {
+			recalculate_timing = true;
 			drm_mode_copy(&saved_mode, &mode);
 			saved_mode.picture_aspect_ratio = mode.picture_aspect_ratio;
 			drm_mode_copy(&mode, freesync_mode);
@@ -1745,11 +1780,11 @@ create_stream_for_sink(struct drm_connector *connector,
 	 */
 	if (!scale || mode_refresh != preferred_refresh)
 		fill_stream_properties_from_drm_display_mode(
-			stream, &mode, connector, con_state, NULL,
+			stream, &mode, connector, sink, con_state, NULL,
 			requested_bpc, requested_encoding, is_hdmi_ep);
 	else
 		fill_stream_properties_from_drm_display_mode(
-			stream, &mode, connector, con_state, old_stream,
+			stream, &mode, connector, sink, con_state, old_stream,
 			requested_bpc, requested_encoding, is_hdmi_ep);
 
 	/* The rest isn't needed for writeback connectors */
@@ -2670,27 +2705,25 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 	return NULL;
 }
 
+/*
+ * atomic_check builds streams with the preferred mode copied at the end of
+ * the last probe. amdgpu_dm_connector_fill_modes() writes it with
+ * connection_mutex held, which atomic_check holds for every connector in the
+ * commit. create_stream_for_sink() uses it only for the sink it was taken
+ * from
+ */
 STATIC_IFN_KUNIT const struct drm_display_mode *
-amdgpu_dm_connector_preferred_mode(struct drm_connector *connector,
-				   struct drm_display_mode *native)
+amdgpu_dm_connector_preferred_mode(struct drm_connector *connector)
 {
-	const struct drm_display_mode *mode;
+	struct amdgpu_dm_connector *aconnector;
 
 	if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
 		return NULL;
 
-	list_for_each_entry(mode, &connector->modes, head) {
-		if (mode->type & DRM_MODE_TYPE_PREFERRED)
-			return mode;
-	}
+	drm_modeset_lock_assert_held(&connector->dev->mode_config.connection_mutex);
 
-	mode = amdgpu_dm_panel_native_mode(connector, &connector->modes, native);
-	if (mode)
-		return mode;
-
-	mode = list_first_entry_or_null(&connector->modes,
-					struct drm_display_mode, head);
-	if (!mode) {
+	aconnector = to_amdgpu_dm_connector(connector);
+	if (!aconnector->preferred_mode.clock) {
 		/*
 		 * This may not be an error, the use case is when we have no
 		 * usermode calls to reset and set mode upon hotplug. In this
@@ -2698,9 +2731,10 @@ amdgpu_dm_connector_preferred_mode(struct drm_connector *connector,
 		 * and the modelist may not be filled in time
 		 */
 		drm_dbg_driver(connector->dev, "No preferred mode found\n");
+		return NULL;
 	}
 
-	return mode;
+	return &aconnector->preferred_mode;
 }
 EXPORT_IF_KUNIT(amdgpu_dm_connector_preferred_mode);
 
@@ -2710,17 +2744,17 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 					  const struct dm_connector_state *dm_state,
 					  const struct dc_stream_state *old_stream)
 {
-	struct drm_display_mode native;
-
 	/*
 	 * amdgpu_dm_create_validate_stream() checks this as well. Without a
-	 * state there is no commit, so skip the preferred mode lookup too
+	 * state there is no commit, and the caller may not hold
+	 * connection_mutex, which the preferred mode lookup asserts, so skip the
+	 * lookup too
 	 */
 	if (!dm_state)
 		return NULL;
 
 	return amdgpu_dm_create_validate_stream(connector, drm_mode,
-					 amdgpu_dm_connector_preferred_mode(connector, &native),
+					 amdgpu_dm_connector_preferred_mode(connector),
 					 dm_state, old_stream);
 }
 EXPORT_IF_KUNIT(amdgpu_dm_create_validate_stream_for_sink);
@@ -2765,12 +2799,12 @@ enum drm_mode_status amdgpu_dm_connector_mode_valid(struct drm_connector *connec
 	drm_mode_set_crtcinfo(test_mode, 0);
 
 	/*
-	 * During a probe connector->modes still holds the previous probe's
-	 * modes, possibly of another sink, and the probe knows its preferred
-	 * mode only once mode_valid has seen every mode. Validate each mode
-	 * with its own timing, even where atomic_check drives another one, the
-	 * preferred mode's with scaling on or the native one for eDP and LVDS
-	 * common modes
+	 * The preferred mode copy is from the previous probe, possibly of
+	 * another sink, and the probe knows its preferred mode only once
+	 * mode_valid has seen every mode. Validate each mode with its own
+	 * timing, even where atomic_check drives another one, the preferred
+	 * mode's with scaling on or the native one for eDP and LVDS common
+	 * modes
 	 */
 	stream = amdgpu_dm_create_validate_stream(connector, test_mode, NULL,
 						  to_dm_connector_state(connector->state),
@@ -3276,7 +3310,7 @@ STATIC_IFN_KUNIT uint add_fs_modes(struct amdgpu_dm_connector *aconnector)
 	 * with lower resolution than the highest refresh rate supported.
 	 */
 
-	m = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true);
+	m = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true, aconnector->dc_sink);
 	if (!m)
 		return 0;
 
@@ -4148,7 +4182,7 @@ void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
 				 */
 				if (!amdgpu_dm_connector->max_vfreq) {
 					struct drm_display_mode *brr_mode =
-						amdgpu_dm_get_highest_refresh_rate_mode(amdgpu_dm_connector, true);
+						amdgpu_dm_get_highest_refresh_rate_mode(amdgpu_dm_connector, true, sink);
 
 					if (brr_mode)
 						amdgpu_dm_connector->max_vfreq =

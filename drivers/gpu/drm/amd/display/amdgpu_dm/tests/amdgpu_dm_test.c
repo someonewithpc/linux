@@ -3214,6 +3214,74 @@ static void dm_test_aquire_global_lock_waits_commit(struct kunit *test)
 }
 
 /**
+ * dm_test_freesync_video_config_new_sink - Test the fixed config follows the new stream's sink
+ * @test: The KUnit test context
+ *
+ * The mode is a 50 Hz FreeSync video mode of a 1080p60 base. The fixed config
+ * is set only when the copies match the sink the new stream was built for,
+ * the sink create_stream_for_sink() checked when it picked the timing
+ */
+static void dm_test_freesync_video_config_new_sink(struct kunit *test)
+{
+	uint saved_vid_mode = amdgpu_freesync_vid_mode;
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *base, *mode;
+	struct dm_crtc_state *crtc_state;
+	struct dc_stream_state *stream;
+	struct dc_sink *sink, *other;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	crtc_state = kunit_kzalloc(test, sizeof(*crtc_state), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, crtc_state);
+	stream = kunit_kzalloc(test, sizeof(*stream), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, stream);
+	sink = kunit_kzalloc(test, sizeof(*sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, other);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	base = &aconnector->freesync_vid_base;
+	base->clock = 148500;
+	base->hdisplay = 1920;
+	base->hsync_start = 2008;
+	base->hsync_end = 2052;
+	base->htotal = 2200;
+	base->vdisplay = 1080;
+	base->vsync_start = 1084;
+	base->vsync_end = 1089;
+	base->vtotal = 1125;
+
+	mode = &crtc_state->base.mode;
+	drm_mode_copy(mode, base);
+	mode->vsync_start += 225;
+	mode->vsync_end += 225;
+	mode->vtotal += 225;
+
+	memset(sink->dc_edid.raw_edid, 0x5a, 128);
+	sink->dc_edid.length = 128;
+	other->dc_edid = sink->dc_edid;
+	other->dc_edid.raw_edid[12]++;
+	aconnector->mode_copies_edid_len = 128;
+	memcpy(aconnector->mode_copies_edid, sink->dc_edid.raw_edid, 128);
+
+	amdgpu_freesync_vid_mode = 1;
+
+	stream->sink = other;
+	dm_set_freesync_video_config(aconnector, crtc_state, stream);
+	KUNIT_EXPECT_EQ(test, (int)crtc_state->freesync_config.state,
+			(int)VRR_STATE_UNSUPPORTED);
+
+	stream->sink = sink;
+	dm_set_freesync_video_config(aconnector, crtc_state, stream);
+	KUNIT_EXPECT_EQ(test, (int)crtc_state->freesync_config.state,
+			(int)VRR_STATE_ACTIVE_FIXED);
+
+	amdgpu_freesync_vid_mode = saved_vid_mode;
+}
+
+/**
  * dm_test_update_crtc_state_unchanged - Test unchanged state needs no validation
  * @test: The KUnit test context
  */
@@ -5359,6 +5427,7 @@ static struct kunit_case amdgpu_dm_tests[] = {
 	KUNIT_CASE(dm_test_aquire_global_lock_no_crtc),
 	KUNIT_CASE(dm_test_aquire_global_lock_no_commit),
 	KUNIT_CASE(dm_test_aquire_global_lock_waits_commit),
+	KUNIT_CASE(dm_test_freesync_video_config_new_sink),
 	KUNIT_CASE(dm_test_update_crtc_state_unchanged),
 	KUNIT_CASE(dm_test_update_plane_state_detached),
 	KUNIT_CASE(dm_test_mod_power_update_streams_empty),
