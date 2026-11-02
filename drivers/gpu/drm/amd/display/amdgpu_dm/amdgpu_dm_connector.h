@@ -51,6 +51,8 @@ struct drm_edid;
 struct drm_property;
 
 void amdgpu_dm_connector_funcs_reset(struct drm_connector *connector);
+int amdgpu_dm_connector_fill_modes(struct drm_connector *connector,
+				   u32 max_width, u32 max_height);
 
 struct drm_connector_state *
 amdgpu_dm_connector_atomic_duplicate_state(struct drm_connector *connector);
@@ -169,6 +171,7 @@ void amdgpu_dm_connector_add_common_modes(struct drm_encoder *encoder,
 void amdgpu_dm_connector_ddc_get_modes(struct drm_connector *connector,
 				       const struct drm_edid *drm_edid);
 uint add_fs_modes(struct amdgpu_dm_connector *aconnector);
+void amdgpu_dm_connector_copy_probed_modes(struct amdgpu_dm_connector *aconnector);
 void amdgpu_dm_connector_add_freesync_modes(struct drm_connector *connector,
 					    const struct drm_edid *drm_edid);
 void hdmi_cec_unset_edid(struct amdgpu_dm_connector *aconnector);

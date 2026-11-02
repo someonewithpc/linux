@@ -873,8 +873,28 @@ struct amdgpu_dm_connector {
 	struct dsc_preferred_settings dsc_settings;
 	struct psr_caps psr_caps;
 	union dp_downstream_port_present mst_downstream_port_present;
-	/* Cached display modes */
+	/*
+	 * Copies of the preferred mode in base.modes and of the highest
+	 * refresh rate mode at its size, taken at the end of each probe. The
+	 * second is fs_modes_base when ->get_modes() built FreeSync video modes.
+	 * Written with &drm_mode_config.mutex and
+	 * &drm_mode_config.connection_mutex held, so holding either one is
+	 * enough to read them. atomic_check holds only the modeset locks, so it
+	 * reads these instead of base.modes. mode_copies_edid_len and
+	 * mode_copies_edid_crc describe the EDID of the dc_sink that probe
+	 * saw, and are 0 if it had none
+	 */
+	struct drm_display_mode preferred_mode;
 	struct drm_display_mode freesync_vid_base;
+	u32 mode_copies_edid_len;
+	u32 mode_copies_edid_crc;
+	/*
+	 * The mode add_fs_modes() built the FreeSync video modes from in the
+	 * last ->get_modes(), or 0s. It comes from the EDID, while base.modes
+	 * can also hold a command line mode. Protected by
+	 * &drm_mode_config.mutex
+	 */
+	struct drm_display_mode fs_modes_base;
 
 	int sr_skip_count;
 	bool disallow_edp_enter_psr;
