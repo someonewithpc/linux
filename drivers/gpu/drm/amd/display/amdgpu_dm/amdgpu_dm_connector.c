@@ -600,6 +600,8 @@ void amdgpu_dm_update_connector_after_detect(
 		drm_edid_free(aconnector->drm_edid);
 		aconnector->drm_edid = NULL;
 		if (sink->dc_edid.length == 0) {
+			/* Drop the previous sink's EDID and display info */
+			drm_edid_connector_update(connector, NULL);
 			hdmi_cec_unset_edid(aconnector);
 			if (aconnector->dc_link->aux_mode)
 				drm_dp_cec_unset_edid(&aconnector->dm_dp_aux.aux);
