@@ -1518,6 +1518,75 @@ static void dm_test_brightness_curve_pwm_steps(struct kunit *test)
 }
 
 /**
+ * dm_test_brightness_from_user_curve_floor - Test Custom curve ends are the minimum and max
+ * @test: The KUnit test context
+ *
+ * A request for 0 must reach the panel as the minimum, not as the minimum
+ * applied twice, and a request for max must reach max, on both the PWM and
+ * the AUX range
+ */
+static void dm_test_brightness_from_user_curve_floor(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int user_min, user_max;
+
+	dm_test_enable_custom_curve(test);
+
+	set_gv301qh_caps(&caps, false);
+	get_brightness_range(&caps, &user_min, &user_max);
+	KUNIT_EXPECT_EQ(test, user_min, 3084U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)user_min);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, user_max), (u32)user_max);
+
+	set_gv301qh_caps(&caps, true);
+	get_brightness_range(&caps, &user_min, &user_max);
+	KUNIT_EXPECT_EQ(test, user_min, 1000U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 0), (u32)user_min);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, user_max), (u32)user_max);
+}
+
+/**
+ * dm_test_brightness_from_user_curve_values - Test Custom curve output on the AUX range
+ * @test: The KUnit test context
+ *
+ * Worked out by hand on the AUX range of 1000..512000 millinits. 1000 is
+ * signal 0.498, so 0.0711% from (0, 0) to the first point (14, 2), and
+ * 1000 + 511000 * 0.000711 gives 1364. 200000 is signal 99.61, between
+ * (98, 50) and (103, 52), so 50.644% and 259790
+ */
+static void dm_test_brightness_from_user_curve_values(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_caps(&caps, true);
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 1000), 1364U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 200000), 259790U);
+}
+
+/**
+ * dm_test_brightness_from_user_curve_aux_top - Test AUX curve ignores the PWM max_input_signal
+ * @test: The KUnit test context
+ *
+ * On AUX the curve runs to 100% at signal 255 even when max_input_signal,
+ * a PWM limit, is lower. With max_input_signal 251, 499953 is signal
+ * 249.00003, between the last point (247, 98) and 100% at 255, so 98.5%
+ * and 504335. Ending the curve at 251 would give 99% and 506890
+ */
+static void dm_test_brightness_from_user_curve_aux_top(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+
+	dm_test_enable_custom_curve(test);
+	set_gv301qh_caps(&caps, true);
+	caps.max_input_signal = 251;
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 499953), 504335U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 512000), 512000U);
+}
+
+/**
  * dm_test_brightness_curve_pwm_points_above_max - Test PWM curve points above max_input_signal
  * @test: The KUnit test context
  *
@@ -1543,6 +1612,51 @@ static void dm_test_brightness_curve_pwm_points_above_max(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 0x101 * 200), 100000U);
 }
 
+static void check_curve_steps(struct kunit *test,
+			      const struct amdgpu_dm_backlight_caps *caps)
+{
+	unsigned int user_min, user_max, user, steps = 0;
+	u32 prev, cur;
+
+	get_brightness_range(caps, &user_min, &user_max);
+	prev = user_min;
+	for (user = 0; user <= user_max; user++) {
+		cur = convert_brightness_from_user(caps, user);
+		if (cur < prev || cur > user_max) {
+			KUNIT_FAIL(test, "%u gives %u after %u, range %u..%u",
+				   user, cur, prev, user_min, user_max);
+			return;
+		}
+		steps += cur != prev;
+		prev = cur;
+	}
+
+	KUNIT_EXPECT_GT(test, convert_brightness_from_user(caps, user_max / 100), (u32)user_min);
+	KUNIT_EXPECT_GT(test, steps, (user_max - user_min) / 2);
+}
+
+/**
+ * dm_test_brightness_from_user_curve_monotonic - Test Custom curve never drops and keeps its steps
+ * @test: The KUnit test context
+ *
+ * Every request from 0 to max, on both the PWM and the AUX range, must give
+ * a value in user_min..user_max that is no lower than the one for the request
+ * before. 1% of the range must already be above the minimum, and most
+ * requests must change the output
+ */
+static void dm_test_brightness_from_user_curve_monotonic(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+
+	dm_test_enable_custom_curve(test);
+
+	set_gv301qh_caps(&caps, false);
+	check_curve_steps(test, &caps);
+
+	set_gv301qh_caps(&caps, true);
+	check_curve_steps(test, &caps);
+}
+
 /**
  * dm_test_brightness_curve_pwm_luminance_over_100 - Test PWM with an ATIF luminance over 100%
  * @test: The KUnit test context
@@ -1550,7 +1664,9 @@ static void dm_test_brightness_curve_pwm_points_above_max(struct kunit *test)
  * Points (100, 50), (200, 150) and (250, 120) claim more than 100%. The
  * curve uses them as given and caps only the result, as before.
  * Level 125 is 50 + 100 * 25 / 100 = 75%, and the curve reaches full
- * brightness at level 150, halfway to the second point, and stays there
+ * brightness at level 150, halfway to the second point, and stays there.
+ * On the AUX range of 1..255 nits, level 125000 is signal 125, so 1000 +
+ * 75% of 254000
  */
 static void dm_test_brightness_curve_pwm_luminance_over_100(struct kunit *test)
 {
@@ -1564,9 +1680,20 @@ static void dm_test_brightness_curve_pwm_luminance_over_100(struct kunit *test)
 	dm_test_enable_custom_curve(test);
 	set_custom_curve_caps(&caps, points, ARRAY_SIZE(points));
 
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 125 * 0x101), 49151U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 150 * 0x101), 65535U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 225 * 0x101), 65535U);
 	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 125 * 0x101), 75000U);
 	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 150 * 0x101), 100000U);
 	KUNIT_EXPECT_EQ(test, convert_brightness_to_millipercent(&caps, 225 * 0x101), 100000U);
+
+	caps.aux_support = true;
+	caps.aux_min_input_signal = 1;
+	caps.aux_max_input_signal = 255;
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 125000), 191500U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 150000), 255000U);
+	KUNIT_EXPECT_EQ(test, convert_brightness_from_user(&caps, 225000), 255000U);
 }
 
 /**
@@ -2268,7 +2395,11 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_brightness_from_user_curve_min),
 	KUNIT_CASE(dm_test_brightness_curve_pwm_values),
 	KUNIT_CASE(dm_test_brightness_curve_pwm_steps),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_floor),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_values),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_aux_top),
 	KUNIT_CASE(dm_test_brightness_curve_pwm_points_above_max),
+	KUNIT_CASE(dm_test_brightness_from_user_curve_monotonic),
 	KUNIT_CASE(dm_test_brightness_curve_pwm_luminance_over_100),
 	KUNIT_CASE(dm_test_brightness_range_zero_signals),
 	/* amdgpu_dm_backlight_fill_props */
