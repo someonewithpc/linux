@@ -8035,6 +8035,47 @@ static void dm_test_update_after_detect_replace_no_edid(struct kunit *test)
 }
 
 /**
+ * dm_test_update_after_detect_edid_to_no_edid - Test an EDID-less sink drops the old EDID
+ * @test: The KUnit test context
+ *
+ * A sink without EDID replacing one with EDID must not inherit the old
+ * sink's EDID property and display info. The EDID change bumps the epoch
+ * counter
+ */
+static void dm_test_update_after_detect_edid_to_no_edid(struct kunit *test)
+{
+	struct dm_test_uad_ctx *ctx =
+		dm_test_uad_ctx_alloc(test, DRM_MODE_CONNECTOR_HDMIA);
+	struct dc_sink *old_sink = dm_test_uad_kept_sink(test);
+	struct dc_sink *new_sink = dm_test_uad_kept_sink(test);
+	u64 epoch;
+
+	KUNIT_ASSERT_NOT_NULL(test, old_sink);
+	KUNIT_ASSERT_NOT_NULL(test, new_sink);
+
+	old_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	memcpy(old_sink->dc_edid.raw_edid, dm_test_uad_edid, sizeof(dm_test_uad_edid));
+	old_sink->dc_edid.length = sizeof(dm_test_uad_edid);
+	ctx->link->local_sink = old_sink;
+
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+	KUNIT_ASSERT_NOT_NULL(test, ctx->aconnector->base.edid_blob_ptr);
+	epoch = ctx->aconnector->base.epoch_counter;
+
+	new_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	ctx->link->local_sink = new_sink;
+
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+
+	KUNIT_EXPECT_PTR_EQ(test, ctx->aconnector->dc_sink, new_sink);
+	KUNIT_EXPECT_NULL(test, ctx->aconnector->base.edid_blob_ptr);
+	KUNIT_EXPECT_GT(test, ctx->aconnector->base.epoch_counter, epoch);
+
+	kfree(ctx->aconnector->timing_requested);
+	ctx->aconnector->timing_requested = NULL;
+}
+
+/**
  * dm_test_update_after_detect_disconnect - Test tearing down on unplug
  * @test: The KUnit test context
  *
@@ -10679,6 +10720,7 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_update_after_detect_mst_sink),
 	KUNIT_CASE(dm_test_update_after_detect_connect_edid),
 	KUNIT_CASE(dm_test_update_after_detect_replace_no_edid),
+	KUNIT_CASE(dm_test_update_after_detect_edid_to_no_edid),
 	KUNIT_CASE(dm_test_update_after_detect_disconnect),
 	KUNIT_CASE(dm_test_update_after_detect_force_em_adopt),
 	KUNIT_CASE(dm_test_update_after_detect_force_em_replace),
