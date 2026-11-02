@@ -2499,6 +2499,42 @@ static void dm_test_highest_refresh_skips_modes(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
 }
 
+/**
+ * dm_test_highest_refresh_stale_copy - Test a copy from before a hotplug is ignored
+ * @test: The KUnit test context
+ *
+ * Once epoch_counter has moved past the one the copy was taken at, the
+ * freesync base belongs to another monitor, so atomic_check gets none
+ */
+static void dm_test_highest_refresh_stale_copy(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+	aconnector->freesync_vid_base.clock = 148500;
+	aconnector->freesync_vid_base.hdisplay = 1920;
+	aconnector->freesync_vid_base.vdisplay = 1080;
+	aconnector->freesync_vid_base.htotal = 2200;
+	aconnector->freesync_vid_base.vtotal = 1125;
+	drm_mode_copy(mode, &aconnector->freesync_vid_base);
+
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
+			    &aconnector->freesync_vid_base);
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_is_freesync_video_mode(mode, aconnector));
+
+	aconnector->base.epoch_counter++;
+
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false));
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(mode, aconnector));
+}
+
 /* Tests for amdgpu_dm_connector_copy_probed_modes() */
 
 static struct drm_display_mode *
@@ -2575,6 +2611,31 @@ static void dm_test_copy_probed_modes_no_preferred(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
 	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 148500);
+}
+
+/**
+ * dm_test_copy_probed_modes_epoch - Test the copies record the current epoch
+ * @test: The KUnit test context
+ */
+static void dm_test_copy_probed_modes_epoch(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+	aconnector->base.epoch_counter = 5;
+
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 148500,
+			      DRM_MODE_TYPE_PREFERRED);
+
+	amdgpu_dm_connector_copy_probed_modes(aconnector);
+
+	KUNIT_EXPECT_EQ(test, aconnector->mode_copies_epoch, 5);
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
+			    &aconnector->freesync_vid_base);
 }
 
 /**
@@ -7447,6 +7508,33 @@ static void dm_test_create_validate_stream_scaled_copy(struct kunit *test)
 }
 
 /**
+ * dm_test_create_validate_stream_stale_copy - Test atomic_check ignores a stale copy
+ * @test: The KUnit test context
+ *
+ * After a hotplug, drm core has bumped epoch_counter and the copy describes
+ * the previous monitor. Its timing must not be applied, even with scaling on
+ */
+static void dm_test_create_validate_stream_stale_copy(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
+
+	/* drm_mode_convert_umode() fills in the CRTC timing of atomic modes */
+	drm_mode_set_crtcinfo(c->mode, CRTC_INTERLACE_HALVE_V);
+	c->dm_state->scaling = RMX_FULL;
+	dm_test_cvs_set_preferred_copy(c);
+	c->aconnector->base.epoch_counter++;
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
+	dm_test_cvs_first_h_addressable = 0;
+
+	KUNIT_EXPECT_NULL(test,
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 1920);
+}
+
+/**
  * dm_test_mode_valid_ignores_preferred_copy - Test mode_valid uses the mode's own timing
  * @test: The KUnit test context
  *
@@ -8071,6 +8159,121 @@ static void dm_test_update_after_detect_edid_to_no_edid(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, ctx->aconnector->base.edid_blob_ptr);
 	KUNIT_EXPECT_GT(test, ctx->aconnector->base.epoch_counter, epoch);
 
+	kfree(ctx->aconnector->timing_requested);
+	ctx->aconnector->timing_requested = NULL;
+}
+
+/**
+ * dm_test_update_after_detect_no_edid_to_edid - Test an EDID after none bumps the epoch
+ * @test: The KUnit test context
+ *
+ * drm_edid_connector_update() bumps epoch_counter only when it replaces an
+ * EDID. A sink with EDID replacing one without must bump it as well, or the
+ * mode copies taken for the EDID-less sink would be kept
+ */
+static void dm_test_update_after_detect_no_edid_to_edid(struct kunit *test)
+{
+	struct dm_test_uad_ctx *ctx =
+		dm_test_uad_ctx_alloc(test, DRM_MODE_CONNECTOR_HDMIA);
+	struct dc_sink *old_sink = dm_test_uad_kept_sink(test);
+	struct dc_sink *new_sink = dm_test_uad_kept_sink(test);
+	u64 epoch;
+
+	KUNIT_ASSERT_NOT_NULL(test, old_sink);
+	KUNIT_ASSERT_NOT_NULL(test, new_sink);
+
+	old_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	ctx->link->local_sink = old_sink;
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+	KUNIT_ASSERT_NULL(test, ctx->aconnector->base.edid_blob_ptr);
+	epoch = ctx->aconnector->base.epoch_counter;
+
+	new_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	memcpy(new_sink->dc_edid.raw_edid, dm_test_uad_edid, sizeof(dm_test_uad_edid));
+	new_sink->dc_edid.length = sizeof(dm_test_uad_edid);
+	ctx->link->local_sink = new_sink;
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+
+	KUNIT_EXPECT_PTR_EQ(test, ctx->aconnector->dc_sink, new_sink);
+	KUNIT_EXPECT_NOT_NULL(test, ctx->aconnector->base.edid_blob_ptr);
+	KUNIT_EXPECT_GT(test, ctx->aconnector->base.epoch_counter, epoch);
+
+	drm_edid_free(ctx->aconnector->drm_edid);
+	ctx->aconnector->drm_edid = NULL;
+	kfree(ctx->aconnector->timing_requested);
+	ctx->aconnector->timing_requested = NULL;
+}
+
+/**
+ * dm_test_update_after_detect_no_edid_swap - Test swapping EDID-less sinks bumps the epoch
+ * @test: The KUnit test context
+ *
+ * With no EDID before or after, drm_edid_connector_update() has nothing to
+ * compare, so the driver has to bump epoch_counter for the new sink
+ */
+static void dm_test_update_after_detect_no_edid_swap(struct kunit *test)
+{
+	struct dm_test_uad_ctx *ctx =
+		dm_test_uad_ctx_alloc(test, DRM_MODE_CONNECTOR_HDMIA);
+	struct dc_sink *old_sink = dm_test_uad_kept_sink(test);
+	struct dc_sink *new_sink = dm_test_uad_kept_sink(test);
+	u64 epoch;
+
+	KUNIT_ASSERT_NOT_NULL(test, old_sink);
+	KUNIT_ASSERT_NOT_NULL(test, new_sink);
+
+	old_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	ctx->link->local_sink = old_sink;
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+	epoch = ctx->aconnector->base.epoch_counter;
+
+	new_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	ctx->link->local_sink = new_sink;
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+
+	KUNIT_EXPECT_PTR_EQ(test, ctx->aconnector->dc_sink, new_sink);
+	KUNIT_EXPECT_GT(test, ctx->aconnector->base.epoch_counter, epoch);
+
+	kfree(ctx->aconnector->timing_requested);
+	ctx->aconnector->timing_requested = NULL;
+}
+
+/**
+ * dm_test_update_after_detect_same_edid_keeps_epoch - Test a replug keeps the epoch
+ * @test: The KUnit test context
+ *
+ * A new sink object with the same EDID is the same monitor plugged again, so
+ * the mode copies stay valid
+ */
+static void dm_test_update_after_detect_same_edid_keeps_epoch(struct kunit *test)
+{
+	struct dm_test_uad_ctx *ctx =
+		dm_test_uad_ctx_alloc(test, DRM_MODE_CONNECTOR_HDMIA);
+	struct dc_sink *old_sink = dm_test_uad_kept_sink(test);
+	struct dc_sink *new_sink = dm_test_uad_kept_sink(test);
+	u64 epoch;
+
+	KUNIT_ASSERT_NOT_NULL(test, old_sink);
+	KUNIT_ASSERT_NOT_NULL(test, new_sink);
+
+	old_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	memcpy(old_sink->dc_edid.raw_edid, dm_test_uad_edid, sizeof(dm_test_uad_edid));
+	old_sink->dc_edid.length = sizeof(dm_test_uad_edid);
+	ctx->link->local_sink = old_sink;
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+	epoch = ctx->aconnector->base.epoch_counter;
+
+	new_sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	memcpy(new_sink->dc_edid.raw_edid, dm_test_uad_edid, sizeof(dm_test_uad_edid));
+	new_sink->dc_edid.length = sizeof(dm_test_uad_edid);
+	ctx->link->local_sink = new_sink;
+	amdgpu_dm_update_connector_after_detect(ctx->aconnector);
+
+	KUNIT_EXPECT_PTR_EQ(test, ctx->aconnector->dc_sink, new_sink);
+	KUNIT_EXPECT_EQ(test, ctx->aconnector->base.epoch_counter, epoch);
+
+	drm_edid_free(ctx->aconnector->drm_edid);
+	ctx->aconnector->drm_edid = NULL;
 	kfree(ctx->aconnector->timing_requested);
 	ctx->aconnector->timing_requested = NULL;
 }
@@ -10498,9 +10701,11 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_highest_refresh_preferred_mode),
 	KUNIT_CASE(dm_test_highest_refresh_probed_over_copy),
 	KUNIT_CASE(dm_test_highest_refresh_skips_modes),
+	KUNIT_CASE(dm_test_highest_refresh_stale_copy),
 	/* amdgpu_dm_connector_copy_probed_modes */
 	KUNIT_CASE(dm_test_copy_probed_modes_highest_refresh),
 	KUNIT_CASE(dm_test_copy_probed_modes_no_preferred),
+	KUNIT_CASE(dm_test_copy_probed_modes_epoch),
 	KUNIT_CASE(dm_test_copy_probed_modes_empty),
 	/* amdgpu_dm_is_freesync_video_mode */
 	KUNIT_CASE(dm_test_is_freesync_video_mode_null_mode),
@@ -10713,6 +10918,7 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_validate_stream_prune_context),
 	KUNIT_CASE(dm_test_create_validate_stream_hdmi_rgb_first),
 	KUNIT_CASE(dm_test_create_validate_stream_scaled_copy),
+	KUNIT_CASE(dm_test_create_validate_stream_stale_copy),
 	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_copy),
 	/* amdgpu_dm_update_connector_after_detect */
 	KUNIT_CASE(dm_test_update_after_detect_mst_noop),
@@ -10721,6 +10927,9 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_update_after_detect_connect_edid),
 	KUNIT_CASE(dm_test_update_after_detect_replace_no_edid),
 	KUNIT_CASE(dm_test_update_after_detect_edid_to_no_edid),
+	KUNIT_CASE(dm_test_update_after_detect_no_edid_to_edid),
+	KUNIT_CASE(dm_test_update_after_detect_no_edid_swap),
+	KUNIT_CASE(dm_test_update_after_detect_same_edid_keeps_epoch),
 	KUNIT_CASE(dm_test_update_after_detect_disconnect),
 	KUNIT_CASE(dm_test_update_after_detect_force_em_adopt),
 	KUNIT_CASE(dm_test_update_after_detect_force_em_replace),
