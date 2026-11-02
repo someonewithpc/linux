@@ -69,6 +69,8 @@ int get_brightness_range(const struct amdgpu_dm_backlight_caps *caps,
 			 unsigned int *user_min, unsigned int *user_max);
 void convert_custom_brightness(const struct amdgpu_dm_backlight_caps *caps,
 			       unsigned int user_max, uint32_t *user_brightness);
+u32 convert_brightness_to_millipercent(const struct amdgpu_dm_backlight_caps *caps,
+				       u32 user_brightness);
 u32 convert_brightness_from_user(const struct amdgpu_dm_backlight_caps *caps,
 				 uint32_t brightness);
 u32 convert_brightness_to_user(const struct amdgpu_dm_backlight_caps *caps,
