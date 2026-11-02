@@ -902,10 +902,13 @@ struct amdgpu_dm_connector {
 	 * Written with &drm_mode_config.mutex and
 	 * &drm_mode_config.connection_mutex held, so holding either one is
 	 * enough to read them. atomic_check holds only the modeset locks, so it
-	 * reads these instead of base.modes
+	 * reads these instead of base.modes. They describe the monitor seen at
+	 * base.epoch_counter == mode_copies_epoch, and are ignored once the EDID
+	 * or the connection status has changed
 	 */
 	struct drm_display_mode preferred_mode;
 	struct drm_display_mode freesync_vid_base;
+	u64 mode_copies_epoch;
 
 	int sr_skip_count;
 	bool disallow_edp_enter_psr;

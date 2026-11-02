@@ -599,6 +599,15 @@ void amdgpu_dm_update_connector_after_detect(
 		dc_sink_retain(aconnector->dc_sink);
 		drm_edid_free(aconnector->drm_edid);
 		aconnector->drm_edid = NULL;
+
+		/*
+		 * drm_edid_connector_update() bumps epoch_counter only when it
+		 * replaces an EDID. After a sink without one there is nothing to
+		 * replace, so bump it here or that sink's mode copies are kept
+		 */
+		if (!connector->edid_blob_ptr)
+			connector->epoch_counter++;
+
 		if (sink->dc_edid.length == 0) {
 			/* Drop the previous sink's EDID and display info */
 			drm_edid_connector_update(connector, NULL);
@@ -1090,6 +1099,18 @@ dm_find_highest_refresh_mode(struct list_head *modes,
 	return m_pref;
 }
 
+/*
+ * Whether the mode copies describe the monitor that is connected now. drm core
+ * bumps epoch_counter, with &drm_mode_config.mutex held, when the EDID or the
+ * connection status changes. atomic_check doesn't hold that lock, so it may
+ * read the counter from just before or just after a change, and either
+ * answer is as good as the race allows
+ */
+static bool dm_mode_copies_current(const struct amdgpu_dm_connector *aconnector)
+{
+	return aconnector->mode_copies_epoch == READ_ONCE(aconnector->base.epoch_counter);
+}
+
 /**
  * DOC: FreeSync Video
  *
@@ -1145,7 +1166,8 @@ amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
 	}
 
 	/* atomic_check can't take that lock, so it reads only the copy */
-	if (aconnector->freesync_vid_base.clock != 0)
+	if (aconnector->freesync_vid_base.clock != 0 &&
+	    dm_mode_copies_current(aconnector))
 		return &aconnector->freesync_vid_base;
 
 	return NULL;
@@ -1186,6 +1208,8 @@ amdgpu_dm_connector_copy_probed_modes(struct amdgpu_dm_connector *aconnector)
 {
 	struct list_head *modes = &aconnector->base.modes;
 	struct drm_display_mode *preferred;
+
+	aconnector->mode_copies_epoch = aconnector->base.epoch_counter;
 
 	preferred = dm_find_preferred_mode(modes);
 	if (!preferred)
@@ -2535,6 +2559,15 @@ dm_connector_preferred_mode(struct drm_connector *connector)
 		 * and the modelist may not be filled in time
 		 */
 		drm_dbg_driver(connector->dev, "No preferred mode found\n");
+		return NULL;
+	}
+
+	/*
+	 * After a hotplug the copy is the previous monitor's until userspace
+	 * probes again. Its timing would be applied to the new one
+	 */
+	if (!dm_mode_copies_current(aconnector)) {
+		drm_dbg_driver(connector->dev, "Preferred mode copy is out of date\n");
 		return NULL;
 	}
 
