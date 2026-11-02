@@ -2399,6 +2399,9 @@ static void dm_test_highest_refresh_cached_base(struct kunit *test)
 /**
  * dm_test_highest_refresh_preferred_mode - Test preferred mode is selected
  * @test: The KUnit test context
+ *
+ * With no copy taken yet, the probe path picks the preferred mode from
+ * probed_modes and leaves the copy alone
  */
 static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 {
@@ -2412,6 +2415,77 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
 	INIT_LIST_HEAD(&aconnector->base.modes);
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+
+	mode->type = DRM_MODE_TYPE_PREFERRED;
+	mode->clock = 148500;
+	mode->hdisplay = 1920;
+	mode->vdisplay = 1080;
+	mode->htotal = 2200;
+	mode->vtotal = 1125;
+	list_add_tail(&mode->head, &aconnector->base.probed_modes);
+
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true),
+			    mode);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
+}
+
+/**
+ * dm_test_highest_refresh_probed_over_copy - Test a probe ignores the previous copy
+ * @test: The KUnit test context
+ *
+ * The copy comes from the previous probe, which may have seen another sink.
+ * While probed_modes has modes, the probe path picks from them instead
+ */
+static void dm_test_highest_refresh_probed_over_copy(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+	aconnector->freesync_vid_base.clock = 74250;
+	aconnector->freesync_vid_base.hdisplay = 1280;
+	aconnector->freesync_vid_base.vdisplay = 720;
+
+	mode->clock = 148500;
+	mode->hdisplay = 1920;
+	mode->vdisplay = 1080;
+	mode->htotal = 2200;
+	mode->vtotal = 1125;
+	list_add_tail(&mode->head, &aconnector->base.probed_modes);
+
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true),
+			    mode);
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
+			    &aconnector->freesync_vid_base);
+}
+
+/**
+ * dm_test_highest_refresh_skips_modes - Test atomic_check callers never walk base.modes
+ * @test: The KUnit test context
+ *
+ * base.modes needs &drm_mode_config.mutex, which atomic_check doesn't hold.
+ * Without a copy the lookup returns NULL, even though base.modes has a mode
+ */
+static void dm_test_highest_refresh_skips_modes(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
 
 	mode->type = DRM_MODE_TYPE_PREFERRED;
 	mode->clock = 148500;
@@ -2421,8 +2495,8 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 	mode->vtotal = 1125;
 	list_add_tail(&mode->head, &aconnector->base.modes);
 
-	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
-			    mode);
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false));
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
 }
 
 /* Tests for amdgpu_dm_connector_copy_probed_modes() */
@@ -4437,7 +4511,10 @@ static void dm_test_create_stream_existing_sink(struct kunit *test)
 	dc_sink_release(sink);
 }
 
-/* Append a copy of the context mode to the connector's mode list. */
+/*
+ * Append a copy of the context mode to the connector's mode list and take the
+ * copies that amdgpu_dm_connector_fill_modes() takes after a probe
+ */
 static void dm_test_stream_add_mode(struct kunit *test, struct dm_test_stream_ctx *ctx,
 				    u32 type)
 {
@@ -4447,6 +4524,7 @@ static void dm_test_stream_add_mode(struct kunit *test, struct dm_test_stream_ct
 	drm_mode_copy(mode, ctx->mode);
 	mode->type = type;
 	list_add_tail(&mode->head, &ctx->aconnector->base.modes);
+	amdgpu_dm_connector_copy_probed_modes(ctx->aconnector);
 }
 
 /* Give the context mode a full set of CRTC timings. */
@@ -6112,9 +6190,10 @@ static void dm_test_add_fs_modes_no_preferred_mode(struct kunit *test)
 
 /*
  * Build a DisplayPort connector whose highest-refresh mode is a fixed
- * 1920x1080@60 timing. A non-zero freesync_vid_base.clock makes
- * amdgpu_dm_get_highest_refresh_rate_mode() return that timing directly,
- * giving the test full control of the reference mode.
+ * 1920x1080@60 timing. While probed_modes is empty, a non-zero
+ * freesync_vid_base.clock makes amdgpu_dm_get_highest_refresh_rate_mode()
+ * return that timing directly, giving the test full control of the reference
+ * mode.
  */
 static struct amdgpu_dm_connector *dm_test_fs_setup(struct kunit *test)
 {
@@ -10272,6 +10351,8 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_highest_refresh_writeback_null),
 	KUNIT_CASE(dm_test_highest_refresh_cached_base),
 	KUNIT_CASE(dm_test_highest_refresh_preferred_mode),
+	KUNIT_CASE(dm_test_highest_refresh_probed_over_copy),
+	KUNIT_CASE(dm_test_highest_refresh_skips_modes),
 	/* amdgpu_dm_connector_copy_probed_modes */
 	KUNIT_CASE(dm_test_copy_probed_modes_highest_refresh),
 	KUNIT_CASE(dm_test_copy_probed_modes_no_preferred),
