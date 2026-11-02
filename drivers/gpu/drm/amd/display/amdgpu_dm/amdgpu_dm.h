@@ -896,7 +896,15 @@ struct amdgpu_dm_connector {
 	struct dsc_preferred_settings dsc_settings;
 	struct psr_caps psr_caps;
 	union dp_downstream_port_present mst_downstream_port_present;
-	/* Cached display modes */
+	/*
+	 * Copies of the preferred mode in base.modes and of the highest
+	 * refresh rate mode at its size, taken at the end of each probe.
+	 * Written with &drm_mode_config.mutex and
+	 * &drm_mode_config.connection_mutex held, so holding either one is
+	 * enough to read them. atomic_check holds only the modeset locks, so it
+	 * reads these instead of base.modes
+	 */
+	struct drm_display_mode preferred_mode;
 	struct drm_display_mode freesync_vid_base;
 
 	int sr_skip_count;

@@ -2425,6 +2425,107 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 			    mode);
 }
 
+/* Tests for amdgpu_dm_connector_copy_probed_modes() */
+
+static struct drm_display_mode *
+dm_test_copy_add_mode(struct kunit *test, struct list_head *modes,
+		      u16 hdisplay, u16 vdisplay, u16 htotal, u16 vtotal,
+		      int clock, u32 type)
+{
+	struct drm_display_mode *mode;
+
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	mode->hdisplay = hdisplay;
+	mode->vdisplay = vdisplay;
+	mode->htotal = htotal;
+	mode->vtotal = vtotal;
+	mode->clock = clock;
+	mode->type = type;
+	list_add_tail(&mode->head, modes);
+
+	return mode;
+}
+
+/**
+ * dm_test_copy_probed_modes_highest_refresh - Test the copies taken from base.modes
+ * @test: The KUnit test context
+ *
+ * The preferred mode is copied as is. The highest refresh rate copy comes from
+ * the preferred size only, even when another size has a higher refresh rate.
+ */
+static void dm_test_copy_probed_modes_highest_refresh(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+
+	dm_test_copy_add_mode(test, modes, 1280, 720, 1650, 750, 297000, 0);
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 148500,
+			      DRM_MODE_TYPE_PREFERRED);
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 297000, 0);
+
+	amdgpu_dm_connector_copy_probed_modes(aconnector);
+
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 148500);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_TRUE(test, aconnector->preferred_mode.type & DRM_MODE_TYPE_PREFERRED);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 297000);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.vdisplay, 1080);
+}
+
+/**
+ * dm_test_copy_probed_modes_no_preferred - Test the first mode stands in for a preferred one
+ * @test: The KUnit test context
+ */
+static void dm_test_copy_probed_modes_no_preferred(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 148500, 0);
+	dm_test_copy_add_mode(test, modes, 1280, 720, 1650, 750, 297000, 0);
+
+	amdgpu_dm_connector_copy_probed_modes(aconnector);
+
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 148500);
+}
+
+/**
+ * dm_test_copy_probed_modes_empty - Test an empty mode list clears both copies
+ * @test: The KUnit test context
+ *
+ * A disconnected connector ends its probe with no modes. Copies from an
+ * earlier probe must not survive that
+ */
+static void dm_test_copy_probed_modes_empty(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	aconnector->preferred_mode.clock = 148500;
+	aconnector->freesync_vid_base.clock = 297000;
+
+	amdgpu_dm_connector_copy_probed_modes(aconnector);
+
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 0);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
+}
+
 /* Tests for amdgpu_dm_is_freesync_video_mode() */
 
 /**
@@ -10171,6 +10272,10 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_highest_refresh_writeback_null),
 	KUNIT_CASE(dm_test_highest_refresh_cached_base),
 	KUNIT_CASE(dm_test_highest_refresh_preferred_mode),
+	/* amdgpu_dm_connector_copy_probed_modes */
+	KUNIT_CASE(dm_test_copy_probed_modes_highest_refresh),
+	KUNIT_CASE(dm_test_copy_probed_modes_no_preferred),
+	KUNIT_CASE(dm_test_copy_probed_modes_empty),
 	/* amdgpu_dm_is_freesync_video_mode */
 	KUNIT_CASE(dm_test_is_freesync_video_mode_null_mode),
 	KUNIT_CASE(dm_test_is_freesync_video_mode_match),
