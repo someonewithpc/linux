@@ -104,8 +104,10 @@ void amdgpu_dm_validate_backlight_caps(struct amdgpu_display_manager *dm, int bl
 	    caps->min_input_signal < 0 ||
 	    spread > AMDGPU_DM_DEFAULT_MAX_BACKLIGHT ||
 	    spread < AMDGPU_DM_MIN_SPREAD) {
-		drm_dbg_kms(adev_to_drm(dm->adev), "DM: Invalid backlight caps: min=%d, max=%d\n",
-			    caps->min_input_signal, caps->max_input_signal);
+		drm_warn(adev_to_drm(dm->adev), FW_BUG
+			 "ATIF: backlight signal range %d to %d is invalid, using %d to %d\n",
+			 caps->min_input_signal, caps->max_input_signal,
+			 AMDGPU_DM_DEFAULT_MIN_BACKLIGHT, AMDGPU_DM_DEFAULT_MAX_BACKLIGHT);
 		caps->caps_valid = false;
 	}
 
