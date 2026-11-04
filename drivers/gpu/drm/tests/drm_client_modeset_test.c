@@ -109,10 +109,9 @@ static void drm_test_pick_cmdline_res_1920_1080_60(struct kunit *test)
 
 	mutex_lock(&drm->mode_config.mutex);
 	ret = drm_helper_probe_single_connector_modes(connector, 1920, 1080);
+	mode = drm_connector_pick_cmdline_mode(connector);
 	mutex_unlock(&drm->mode_config.mutex);
 	KUNIT_ASSERT_GT(test, ret, 0);
-
-	mode = drm_connector_pick_cmdline_mode(connector);
 	KUNIT_ASSERT_NOT_NULL(test, mode);
 
 	KUNIT_EXPECT_TRUE(test, drm_mode_equal(expected_mode, mode));
@@ -148,10 +147,9 @@ static void drm_test_pick_cmdline_named(struct kunit *test)
 
 	mutex_lock(&drm->mode_config.mutex);
 	ret = drm_helper_probe_single_connector_modes(connector, 1920, 1080);
+	mode = drm_connector_pick_cmdline_mode(connector);
 	mutex_unlock(&drm->mode_config.mutex);
 	KUNIT_ASSERT_GT(test, ret, 0);
-
-	mode = drm_connector_pick_cmdline_mode(connector);
 	KUNIT_ASSERT_NOT_NULL(test, mode);
 
 	expected_mode = params->func(drm);
