@@ -125,7 +125,7 @@ drm_connector_get_tiled_mode(struct drm_connector *connector)
 {
 	const struct drm_display_mode *mode;
 
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		if (mode->hdisplay == connector->tile_h_size &&
 		    mode->vdisplay == connector->tile_v_size)
 			return mode;
@@ -138,7 +138,7 @@ drm_connector_fallback_non_tiled_mode(struct drm_connector *connector)
 {
 	const struct drm_display_mode *mode;
 
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		if (mode->hdisplay == connector->tile_h_size &&
 		    mode->vdisplay == connector->tile_v_size)
 			continue;
@@ -152,7 +152,7 @@ drm_connector_preferred_mode(struct drm_connector *connector, int width, int hei
 {
 	const struct drm_display_mode *mode;
 
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		if (mode->hdisplay > width ||
 		    mode->vdisplay > height)
 			continue;
@@ -165,6 +165,8 @@ drm_connector_preferred_mode(struct drm_connector *connector, int width, int hei
 static const struct drm_display_mode *
 drm_connector_first_mode(struct drm_connector *connector)
 {
+	drm_connector_assert_modes_held(connector);
+
 	return list_first_entry_or_null(&connector->modes,
 					struct drm_display_mode, head);
 }
@@ -182,7 +184,7 @@ drm_connector_pick_cmdline_mode(struct drm_connector *connector)
 	 * list.
 	 */
 
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		if (mode->type & DRM_MODE_TYPE_USERDEF)
 			return mode;
 	}
@@ -198,7 +200,7 @@ drm_connector_pick_cmdline_mode(struct drm_connector *connector)
 
 	prefer_non_interlace = !cmdline_mode->interlace;
 again:
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		/* check width/height */
 		if (mode->hdisplay != cmdline_mode->xres ||
 		    mode->vdisplay != cmdline_mode->yres)
@@ -356,7 +358,7 @@ static bool drm_client_target_cloned(struct drm_device *dev,
 		if (!enabled[i])
 			continue;
 
-		list_for_each_entry(mode, &connectors[i]->modes, head) {
+		drm_connector_for_each_mode(mode, connectors[i]) {
 			if (drm_mode_match(mode, dmt_mode,
 					   DRM_MODE_MATCH_TIMINGS |
 					   DRM_MODE_MATCH_CLOCK |
