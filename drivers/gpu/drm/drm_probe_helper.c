@@ -460,7 +460,7 @@ static int __drm_helper_update_and_validate(struct drm_connector *connector,
 	if (connector->stereo_allowed)
 		mode_flags |= DRM_MODE_FLAG_3D_MASK;
 
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		if (mode->status != MODE_OK)
 			continue;
 
@@ -582,7 +582,7 @@ retry:
 		WARN_ON(ret < 0);
 
 	/* set all old modes to the stale state */
-	list_for_each_entry(mode, &connector->modes, head)
+	drm_connector_for_each_mode(mode, connector)
 		mode->status = MODE_STALE;
 
 	old_status = connector->status;
@@ -714,7 +714,7 @@ exit:
 	drm_dbg_kms(dev, "[CONNECTOR:%d:%s] probed modes:\n",
 		    connector->base.id, connector->name);
 
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		drm_mode_set_crtcinfo(mode, CRTC_INTERLACE_HALVE_V);
 		drm_dbg_kms(dev, "Probed mode: " DRM_MODE_FMT "\n",
 			    DRM_MODE_ARG(mode));
