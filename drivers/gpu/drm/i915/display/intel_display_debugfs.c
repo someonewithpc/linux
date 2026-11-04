@@ -292,7 +292,7 @@ static void intel_connector_info(struct seq_file *m,
 	intel_panel_info(m, intel_connector);
 
 	seq_printf(m, "\tmodes:\n");
-	list_for_each_entry(mode, &connector->modes, head)
+	drm_connector_for_each_mode(mode, connector)
 		intel_seq_print_mode(m, 2, mode);
 }
 
