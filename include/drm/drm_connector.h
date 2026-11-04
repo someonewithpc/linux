@@ -3002,4 +3002,33 @@ int drm_connector_attach_color_format_property(struct drm_connector *connector,
 	drm_for_each_encoder_mask(encoder, (connector)->dev, \
 				  (connector)->possible_encoders)
 
+/**
+ * drm_connector_assert_modes_held - check that the mode list of a connector is locked
+ * @connector: &struct drm_connector pointer
+ *
+ * &drm_connector.modes is protected by &drm_mode_config.mutex. Use this before
+ * reading the list outside drm_connector_for_each_mode(), such as with
+ * list_empty() or list_first_entry()
+ *
+ * Users of this and drm_connector_for_each_mode() need the definition of
+ * &struct drm_device from <drm/drm_device.h>
+ */
+#define drm_connector_assert_modes_held(connector) \
+	lockdep_assert_held(&(connector)->dev->mode_config.mutex)
+
+/**
+ * drm_connector_for_each_mode - iterate over the modes of a connector
+ * @mode: &struct drm_display_mode pointer used as cursor
+ * @connector: &struct drm_connector pointer
+ *
+ * Iterates over &drm_connector.modes. The caller must hold
+ * &drm_mode_config.mutex. The loop body must not remove @mode from the list
+ */
+#define drm_connector_for_each_mode(mode, connector) \
+	for (({ drm_connector_assert_modes_held(connector); }), \
+	     mode = list_first_entry(&(connector)->modes, \
+				     struct drm_display_mode, head); \
+	     !list_entry_is_head(mode, &(connector)->modes, head); \
+	     mode = list_next_entry(mode, head))
+
 #endif
