@@ -3706,7 +3706,7 @@ int drm_mode_getconnector(struct drm_device *dev, void *data,
 	out_resp->connection = connector->status;
 
 	/* delayed so we get modes regardless of pre-fill_modes state */
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		WARN_ON(mode->expose_to_userspace);
 
 		if (drm_mode_expose_to_userspace(mode, &connector->modes,
@@ -3723,7 +3723,7 @@ int drm_mode_getconnector(struct drm_device *dev, void *data,
 	if ((out_resp->count_modes >= mode_count) && mode_count) {
 		copied = 0;
 		mode_ptr = (struct drm_mode_modeinfo __user *)(unsigned long)out_resp->modes_ptr;
-		list_for_each_entry(mode, &connector->modes, head) {
+		drm_connector_for_each_mode(mode, connector) {
 			if (!mode->expose_to_userspace)
 				continue;
 
@@ -3756,7 +3756,7 @@ int drm_mode_getconnector(struct drm_device *dev, void *data,
 		}
 	} else {
 		/* Clear the tag for the next time around */
-		list_for_each_entry(mode, &connector->modes, head)
+		drm_connector_for_each_mode(mode, connector)
 			mode->expose_to_userspace = false;
 	}
 
