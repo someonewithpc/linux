@@ -1464,6 +1464,7 @@ EXPORT_IF_KUNIT(amdgpu_dm_update_stream_scaling_settings);
 STATIC_IFN_KUNIT struct dc_stream_state *
 create_stream_for_sink(struct drm_connector *connector,
 		       const struct drm_display_mode *drm_mode,
+		       const struct drm_display_mode *preferred_mode,
 		       const struct dm_connector_state *dm_state,
 		       const struct dc_stream_state *old_stream,
 		       int requested_bpc,
@@ -1472,8 +1473,6 @@ create_stream_for_sink(struct drm_connector *connector,
 {
 	struct drm_device *dev = connector->dev;
 	struct amdgpu_dm_connector *aconnector = NULL;
-	struct drm_display_mode *preferred_mode = NULL;
-	struct drm_display_mode *connector_mode;
 	const struct drm_connector_state *con_state = &dm_state->base;
 	struct dc_stream_state *stream = NULL;
 	struct drm_display_mode mode;
@@ -1529,30 +1528,9 @@ create_stream_for_sink(struct drm_connector *connector,
 	stream->timing.flags.LTE_340MCSC_SCRAMBLE =
 		connector->display_info.hdmi.scdc.scrambling.low_rates;
 
-	list_for_each_entry(connector_mode, &connector->modes, head) {
-		/* Search for preferred mode */
-		if (connector_mode->type & DRM_MODE_TYPE_PREFERRED) {
-			preferred_mode = connector_mode;
-			break;
-		}
-	}
-	if (!preferred_mode)
-		preferred_mode = list_first_entry_or_null(
-				&connector->modes,
-				struct drm_display_mode,
-				head);
-
 	mode_refresh = drm_mode_vrefresh(&mode);
 
-	if (preferred_mode == NULL) {
-		/*
-		 * This may not be an error, the use case is when we have no
-		 * usermode calls to reset and set mode upon hotplug. In this
-		 * case, we call set mode ourselves to restore the previous mode
-		 * and the modelist may not be filled in time.
-		 */
-		drm_dbg_driver(dev, "No preferred mode found\n");
-	} else if (aconnector) {
+	if (aconnector && preferred_mode) {
 		recalculate_timing = amdgpu_freesync_vid_mode &&
 				 amdgpu_dm_is_freesync_video_mode(&mode, aconnector);
 		if (recalculate_timing) {
@@ -2282,11 +2260,12 @@ dm_validate_stream_color_format(const struct drm_connector_state *drm_state,
 		DC_OK : DC_UNSUPPORTED_VALUE;
 }
 
-struct dc_stream_state *
-amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
-					  const struct drm_display_mode *drm_mode,
-					  const struct dm_connector_state *dm_state,
-					  const struct dc_stream_state *old_stream)
+static struct dc_stream_state *
+dm_create_validate_stream(struct drm_connector *connector,
+			  const struct drm_display_mode *drm_mode,
+			  const struct drm_display_mode *preferred_mode,
+			  const struct dm_connector_state *dm_state,
+			  const struct dc_stream_state *old_stream)
 {
 	/*
 	 * Ordered lists of the encodings and bit depths we are willing to
@@ -2328,8 +2307,8 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 	 * meaningful for the writeback path).
 	 */
 	if (!aconnector) {
-		stream = create_stream_for_sink(connector, drm_mode, dm_state,
-						old_stream, requested_bpc,
+		stream = create_stream_for_sink(connector, drm_mode, preferred_mode,
+						dm_state, old_stream, requested_bpc,
 						PIXEL_ENCODING_RGB, is_hdmi_ep);
 		if (!stream)
 			drm_err(adev_to_drm(adev), "Failed to create stream for sink!\n");
@@ -2456,6 +2435,7 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 				    encoding_mask, bpc_mask, requested_bpc);
 
 			stream = create_stream_for_sink(connector, drm_mode,
+							preferred_mode,
 							dm_state, old_stream,
 							bpc, enc, is_hdmi_ep);
 			if (stream == NULL) {
@@ -2496,6 +2476,52 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 	 * the mode is genuinely unsupported on this link.
 	 */
 	return NULL;
+}
+
+static const struct drm_display_mode *
+dm_connector_preferred_mode(struct drm_connector *connector)
+{
+	struct drm_display_mode *mode;
+
+	if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
+		return NULL;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (mode->type & DRM_MODE_TYPE_PREFERRED)
+			return mode;
+	}
+
+	mode = list_first_entry_or_null(&connector->modes,
+					struct drm_display_mode, head);
+	if (!mode) {
+		/*
+		 * This may not be an error, the use case is when we have no
+		 * usermode calls to reset and set mode upon hotplug. In this
+		 * case, we call set mode ourselves to restore the previous mode
+		 * and the modelist may not be filled in time
+		 */
+		drm_dbg_driver(connector->dev, "No preferred mode found\n");
+	}
+
+	return mode;
+}
+
+struct dc_stream_state *
+amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
+					  const struct drm_display_mode *drm_mode,
+					  const struct dm_connector_state *dm_state,
+					  const struct dc_stream_state *old_stream)
+{
+	/*
+	 * dm_create_validate_stream() checks this as well. Without a state there
+	 * is no commit, so skip the preferred mode lookup too
+	 */
+	if (!dm_state)
+		return NULL;
+
+	return dm_create_validate_stream(connector, drm_mode,
+					 dm_connector_preferred_mode(connector),
+					 dm_state, old_stream);
 }
 EXPORT_IF_KUNIT(amdgpu_dm_create_validate_stream_for_sink);
 
@@ -2538,9 +2564,15 @@ enum drm_mode_status amdgpu_dm_connector_mode_valid(struct drm_connector *connec
 
 	drm_mode_set_crtcinfo(test_mode, 0);
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(connector, test_mode,
-						 to_dm_connector_state(connector->state),
-						 NULL);
+	/*
+	 * During a probe connector->modes still holds the previous probe's
+	 * modes, possibly of another sink, and this probe's preferred mode is
+	 * known only once every mode has been validated. Validate each mode
+	 * with its own timing, as the first probe does
+	 */
+	stream = dm_create_validate_stream(connector, test_mode, NULL,
+					   to_dm_connector_state(connector->state),
+					   NULL);
 	drm_mode_destroy(connector->dev, test_mode);
 	if (stream) {
 		dc_stream_release(stream);
