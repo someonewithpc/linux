@@ -1918,7 +1918,7 @@ void drm_connector_list_update(struct drm_connector *connector)
 		bool found_it = false;
 
 		/* go through current modes checking for the new probed mode */
-		list_for_each_entry(mode, &connector->modes, head) {
+		drm_connector_for_each_mode(mode, connector) {
 			if (!drm_mode_equal(pmode, mode))
 				continue;
 
