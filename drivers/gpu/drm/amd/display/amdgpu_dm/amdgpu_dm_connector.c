@@ -2119,10 +2119,26 @@ STATIC_IFN_KUNIT void amdgpu_dm_connector_funcs_force(struct drm_connector *conn
 }
 EXPORT_IF_KUNIT(amdgpu_dm_connector_funcs_force);
 
+/*
+ * The FBC buffer is sized from the largest mode, so it has to wait until the
+ * probe has validated the new modes and merged them into connector->modes
+ */
+static int amdgpu_dm_connector_fill_modes(struct drm_connector *connector,
+					  u32 max_width, u32 max_height)
+{
+	int count;
+
+	count = drm_helper_probe_single_connector_modes(connector, max_width,
+							max_height);
+	amdgpu_dm_fbc_init(connector);
+
+	return count;
+}
+
 static const struct drm_connector_funcs amdgpu_dm_connector_funcs = {
 	.reset = amdgpu_dm_connector_funcs_reset,
 	.detect = amdgpu_dm_connector_detect,
-	.fill_modes = drm_helper_probe_single_connector_modes,
+	.fill_modes = amdgpu_dm_connector_fill_modes,
 	.destroy = amdgpu_dm_connector_destroy,
 	.atomic_duplicate_state = amdgpu_dm_connector_atomic_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
@@ -3122,7 +3138,6 @@ STATIC_IFN_KUNIT int amdgpu_dm_connector_get_modes(struct drm_connector *connect
 			amdgpu_dm_connector_add_common_modes(encoder, connector);
 		amdgpu_dm_connector_add_freesync_modes(connector, drm_edid);
 	}
-	amdgpu_dm_fbc_init(connector);
 
 	return amdgpu_dm_connector->num_modes;
 }
