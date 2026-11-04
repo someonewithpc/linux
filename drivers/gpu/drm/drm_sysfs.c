@@ -285,7 +285,7 @@ static ssize_t modes_show(struct device *device,
 	int written = 0;
 
 	mutex_lock(&connector->dev->mode_config.mutex);
-	list_for_each_entry(mode, &connector->modes, head) {
+	drm_connector_for_each_mode(mode, connector) {
 		written += scnprintf(buf + written, PAGE_SIZE - written, "%s\n",
 				    mode->name);
 	}
