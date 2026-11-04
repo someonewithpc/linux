@@ -1482,7 +1482,6 @@ create_stream_for_sink(struct drm_connector *connector,
 	struct drm_display_mode saved_mode;
 	struct drm_display_mode *freesync_mode = NULL;
 	bool recalculate_timing = false;
-	bool unadvertised_mode = false;
 	bool scale = dm_state->scaling != RMX_OFF;
 	int mode_refresh;
 	int preferred_refresh = 0;
@@ -1614,13 +1613,6 @@ create_stream_for_sink(struct drm_connector *connector,
 					&mode, preferred_mode, scale);
 
 			preferred_refresh = drm_mode_vrefresh(preferred_mode);
-			unadvertised_mode = !is_duplicate_mode(aconnector, drm_mode);
-
-			if (unadvertised_mode && dm_state->scaling == RMX_OFF)
-				drm_dbg_driver(dev,
-					       "Unadvertised mode %dx%d@%d with RMX_OFF\n",
-					       drm_mode->hdisplay, drm_mode->vdisplay,
-					       drm_mode_vrefresh(drm_mode));
 		}
 	}
 
