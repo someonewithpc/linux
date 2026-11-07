@@ -661,14 +661,24 @@ static int amd_pmc_verify_czn_rtc(struct amd_pmc_dev *pdev, u32 *arg)
 			return rc;
 	}
 
-	if (pdev->major < 64 || (pdev->major == 64 && pdev->minor < 53))
-		return 0;
-
 	struct rtc_device *rtc_device __free(rtc_class_close) =
 		rtc_class_open("rtc0");
 	if (!rtc_device)
 		return 0;
 	rc = rtc_read_next_alarm(rtc_device, &alarm);
+
+	if (pdev->major < 64 || (pdev->major == 64 && pdev->minor < 53)) {
+		/* Best effort, a failed read only skips the warning */
+		if (rc || rtc_read_time(rtc_device, &tm))
+			return 0;
+		duration = rtc_tm_to_time64(&alarm.time) - rtc_tm_to_time64(&tm);
+		if (duration > 4 && duration <= U16_MAX)
+			dev_warn_once(pdev->dev,
+				      "RTC alarm may not wake the system from s0i3 with SMU firmware %u.%u, 64.53 or newer is needed\n",
+				      pdev->major, pdev->minor);
+		return 0;
+	}
+
 	if (rc) {
 		if (rc == -ENOENT)
 			dev_dbg(pdev->dev, "no alarm pending\n");
