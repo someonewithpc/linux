@@ -646,6 +646,25 @@ static int amd_pmc_wa_irq1(struct amd_pmc_dev *pdev)
 	return 0;
 }
 
+/*
+ * Older SMU firmware rejects a wakeup time in the OS hint, and on some
+ * platforms the RTC alarm then can't wake the system from s0i3
+ */
+static void amd_pmc_warn_czn_rtc(struct amd_pmc_dev *pdev)
+{
+	struct rtc_device *rtc_device;
+	struct rtc_wkalrm alarm;
+
+	rtc_device = rtc_class_open("rtc0");
+	if (!rtc_device)
+		return;
+	if (!rtc_read_next_alarm(rtc_device, &alarm))
+		dev_warn_once(pdev->dev,
+			      "RTC alarm may not wake the system from s0i3 with SMU firmware %u.%u, 64.53 or newer is needed\n",
+			      pdev->major, pdev->minor);
+	rtc_class_close(rtc_device);
+}
+
 static int amd_pmc_verify_czn_rtc(struct amd_pmc_dev *pdev, u32 *arg)
 {
 	struct rtc_device *rtc_device;
@@ -661,8 +680,10 @@ static int amd_pmc_verify_czn_rtc(struct amd_pmc_dev *pdev, u32 *arg)
 			return rc;
 	}
 
-	if (pdev->major < 64 || (pdev->major == 64 && pdev->minor < 53))
+	if (pdev->major < 64 || (pdev->major == 64 && pdev->minor < 53)) {
+		amd_pmc_warn_czn_rtc(pdev);
 		return 0;
+	}
 
 	rtc_device = rtc_class_open("rtc0");
 	if (!rtc_device)
