@@ -41,6 +41,8 @@ bool amdgpu_dm_psr_is_active_allowed(struct amdgpu_display_manager *dm);
 bool amdgpu_dm_psr_set_event(struct amdgpu_display_manager *dm,
 		struct dc_stream_state *stream, bool set_event,	enum psr_event event,
 		bool wait_for_disable);
+bool amdgpu_dm_psr_event_is_set(struct amdgpu_display_manager *dm,
+				struct dc_stream_state *stream, enum psr_event event);
 
 #if IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
 bool link_supports_psrsu(struct dc_link *link);

@@ -3797,6 +3797,53 @@ static void dm_arm_vblank_event_pre_programming(struct amdgpu_crtc *acrtc,
 		drm_crtc_vblank_get(&acrtc->base);
 }
 
+struct dm_sr_hold {
+	bool psr;
+	bool replay;
+};
+
+/*
+ * DMUB can hang if an ABM level reaches it while the panel is in
+ * self-refresh. A commit that changes only the ABM level is a fast update and
+ * skips the hold in amdgpu_dm_mod_power_update_streams(), so hold PSR and
+ * Replay off around the DC update. Holds that something else already set stay
+ * as they are, for their owner to clear. dc_lock keeps the backlight path and
+ * the other users of these events from changing them in between
+ */
+static struct dm_sr_hold dm_hold_self_refresh(struct amdgpu_display_manager *dm,
+					      struct dc_stream_state *stream)
+{
+	struct dm_sr_hold hold;
+
+	lockdep_assert_held(&dm->dc_lock);
+
+	hold.psr = !amdgpu_dm_psr_event_is_set(dm, stream, psr_event_hw_programming);
+	hold.replay = !amdgpu_dm_replay_event_is_set(dm, stream, replay_event_hw_programming);
+
+	if (hold.psr)
+		amdgpu_dm_psr_set_event(dm, stream, true, psr_event_hw_programming, true);
+	if (hold.replay)
+		amdgpu_dm_replay_set_event(dm, stream, true, replay_event_hw_programming, true);
+
+	return hold;
+}
+
+/*
+ * Nothing else may commit on an idle desktop, so drop the hold right after the
+ * update rather than leaving it to amdgpu_dm_enable_self_refresh()
+ */
+static void dm_release_self_refresh(struct amdgpu_display_manager *dm,
+				    struct dc_stream_state *stream,
+				    struct dm_sr_hold hold)
+{
+	lockdep_assert_held(&dm->dc_lock);
+
+	if (hold.psr)
+		amdgpu_dm_psr_set_event(dm, stream, false, psr_event_hw_programming, false);
+	if (hold.replay)
+		amdgpu_dm_replay_set_event(dm, stream, false, replay_event_hw_programming, false);
+}
+
 static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 				    struct drm_device *dev,
 				    struct amdgpu_display_manager *dm,
@@ -3823,6 +3870,7 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 	bool flip_latched_during_prog = false;
 	bool dirty_rects_changed = false;
 	bool updated_planes_and_streams = false;
+	struct dm_sr_hold sr_hold = {};
 	struct {
 		struct dc_surface_update surface_updates[MAX_SURFACES];
 		struct dc_plane_info plane_infos[MAX_SURFACES];
@@ -4137,12 +4185,17 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 			amdgpu_dm_replay_set_event(dm, acrtc_state->stream, true,
 				replay_event_immediate_flip, true);
 		}
+		if (bundle->stream_update.abm_level) {
+			dc_exit_ips_for_hw_access(dm->dc);
+			sr_hold = dm_hold_self_refresh(dm, acrtc_state->stream);
+		}
 		update_planes_and_stream_adapter(dm->dc,
 					 acrtc_state->update_type,
 					 planes_count,
 					 acrtc_state->stream,
 					 &bundle->stream_update,
 					 bundle->surface_updates);
+		dm_release_self_refresh(dm, acrtc_state->stream, sr_hold);
 		updated_planes_and_streams = true;
 
 		/**
@@ -5172,6 +5225,7 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 		struct dc_info_packet hdr_packet;
 		struct dc_stream_status *status = NULL;
 		bool abm_changed, hdr_changed, scaling_changed, output_color_space_changed = false;
+		struct dm_sr_hold sr_hold = {};
 
 		memset(&stream_update, 0, sizeof(stream_update));
 
@@ -5256,11 +5310,14 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
 
 		mutex_lock(&dm->dc_lock);
 		dc_exit_ips_for_hw_access(dm->dc);
+		if (abm_changed)
+			sr_hold = dm_hold_self_refresh(dm, dm_new_crtc_state->stream);
 		dc_update_planes_and_stream(dm->dc,
 					    dummy_updates,
 					    status->plane_count,
 					    dm_new_crtc_state->stream,
 					    &stream_update);
+		dm_release_self_refresh(dm, dm_new_crtc_state->stream, sr_hold);
 		mutex_unlock(&dm->dc_lock);
 		kfree(dummy_updates);
 
