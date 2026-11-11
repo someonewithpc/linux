@@ -1103,6 +1103,73 @@ amdgpu_dm_panel_native_mode(struct drm_connector *connector, struct list_head *m
 	return native;
 }
 
+static struct drm_display_mode *amdgpu_dm_find_preferred_mode(struct list_head *modes)
+{
+	struct drm_display_mode *m;
+
+	list_for_each_entry(m, modes, head) {
+		if (m->type & DRM_MODE_TYPE_PREFERRED)
+			return m;
+	}
+
+	return NULL;
+}
+
+/*
+ * Find the mode with the highest refresh rate at the size of @m_pref. For
+ * some monitors the preferred mode is not the one with the highest supported
+ * refresh rate
+ */
+static struct drm_display_mode *
+amdgpu_dm_find_highest_refresh_mode(struct list_head *modes,
+				    struct drm_display_mode *m_pref)
+{
+	int highest_refresh = drm_mode_vrefresh(m_pref);
+	struct drm_display_mode *best = m_pref, *m;
+
+	list_for_each_entry(m, modes, head) {
+		int current_refresh = drm_mode_vrefresh(m);
+
+		if (m->hdisplay == m_pref->hdisplay &&
+		    m->vdisplay == m_pref->vdisplay &&
+		    highest_refresh < current_refresh) {
+			highest_refresh = current_refresh;
+			best = m;
+		}
+	}
+
+	return best;
+}
+
+/* The length of @sink's EDID, 0 without a sink or EDID */
+static u32 amdgpu_dm_sink_edid_len(const struct dc_sink *sink)
+{
+	return sink ? min_t(u32, sink->dc_edid.length, sizeof(sink->dc_edid.raw_edid)) : 0;
+}
+
+/*
+ * Whether @modes still holds @fs_base, at the size of @preferred. Validation
+ * may have pruned the FreeSync video modes and their base after
+ * add_fs_modes() recorded it
+ */
+static bool amdgpu_dm_fs_modes_base_listed(struct list_head *modes,
+					   const struct drm_display_mode *fs_base,
+					   const struct drm_display_mode *preferred)
+{
+	const struct drm_display_mode *m;
+
+	if (!fs_base->clock || fs_base->hdisplay != preferred->hdisplay ||
+	    fs_base->vdisplay != preferred->vdisplay)
+		return false;
+
+	list_for_each_entry(m, modes, head) {
+		if (drm_mode_equal(m, fs_base))
+			return true;
+	}
+
+	return false;
+}
+
 /**
  * DOC: FreeSync Video
  *
@@ -1137,8 +1204,7 @@ struct drm_display_mode *
 amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
 		bool use_probed_modes)
 {
-	struct drm_display_mode *m, *m_pref = NULL;
-	u16 current_refresh, highest_refresh;
+	struct drm_display_mode *m_pref;
 	struct list_head *list_head = use_probed_modes ?
 		&aconnector->base.probed_modes :
 		&aconnector->base.modes;
@@ -1146,47 +1212,25 @@ amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
 	if (aconnector->base.connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
 		return NULL;
 
-	if (aconnector->freesync_vid_base.clock != 0)
+	/*
+	 * A probe reads its own probed_modes, not the copy of the last one. The
+	 * copy stands in while probed_modes is empty
+	 */
+	if (aconnector->freesync_vid_base.clock != 0 &&
+	    !(use_probed_modes && !list_empty(list_head)))
 		return &aconnector->freesync_vid_base;
 
-	/* Find the preferred mode */
-	list_for_each_entry(m, list_head, head) {
-		if (m->type & DRM_MODE_TYPE_PREFERRED) {
-			m_pref = m;
-			break;
-		}
-	}
-
+	m_pref = amdgpu_dm_find_preferred_mode(list_head);
 	if (!m_pref) {
 		/* Probably an EDID with no preferred mode. Fallback to first entry */
-		m_pref = list_first_entry_or_null(
-				&aconnector->base.modes, struct drm_display_mode, head);
+		m_pref = list_first_entry_or_null(list_head, struct drm_display_mode, head);
 		if (!m_pref) {
 			drm_dbg_driver(aconnector->base.dev, "No preferred mode found in EDID\n");
 			return NULL;
 		}
 	}
 
-	highest_refresh = drm_mode_vrefresh(m_pref);
-
-	/*
-	 * Find the mode with highest refresh rate with same resolution.
-	 * For some monitors, preferred mode is not the mode with highest
-	 * supported refresh rate.
-	 */
-	list_for_each_entry(m, list_head, head) {
-		current_refresh  = drm_mode_vrefresh(m);
-
-		if (m->hdisplay == m_pref->hdisplay &&
-		    m->vdisplay == m_pref->vdisplay &&
-		    highest_refresh < current_refresh) {
-			highest_refresh = current_refresh;
-			m_pref = m;
-		}
-	}
-
-	drm_mode_copy(&aconnector->freesync_vid_base, m_pref);
-	return m_pref;
+	return amdgpu_dm_find_highest_refresh_mode(list_head, m_pref);
 }
 EXPORT_IF_KUNIT(amdgpu_dm_get_highest_refresh_rate_mode);
 
@@ -1217,6 +1261,85 @@ bool amdgpu_dm_is_freesync_video_mode(const struct drm_display_mode *mode,
 		return true;
 }
 EXPORT_IF_KUNIT(amdgpu_dm_is_freesync_video_mode);
+
+/*
+ * MUST be called with &drm_mode_config.mutex and
+ * &drm_mode_config.connection_mutex held. The detect and ->get_modes() paths
+ * set dc_sink with &drm_mode_config.mutex held, so it is the sink this probe's
+ * modes came from. dm_resume() and the MST connector's ->early_unregister() release
+ * dc_sink without that lock. ->get_modes() and ->mode_valid() read dc_sink
+ * in the same probe, so this read adds no race of its own
+ */
+STATIC_IFN_KUNIT void
+amdgpu_dm_connector_copy_probed_modes(struct amdgpu_dm_connector *aconnector)
+{
+	struct drm_mode_config *config = &aconnector->base.dev->mode_config;
+	struct list_head *modes = &aconnector->base.modes;
+	const struct dc_sink *sink = aconnector->dc_sink;
+	const struct drm_display_mode *preferred, *highest;
+	struct drm_display_mode native;
+
+	lockdep_assert_held(&config->mutex);
+	drm_modeset_lock_assert_held(&config->connection_mutex);
+
+	aconnector->mode_copies_edid_len = amdgpu_dm_sink_edid_len(sink);
+	if (aconnector->mode_copies_edid_len)
+		memcpy(aconnector->mode_copies_edid, sink->dc_edid.raw_edid,
+		       aconnector->mode_copies_edid_len);
+
+	preferred = amdgpu_dm_find_preferred_mode(modes);
+	if (!preferred)
+		preferred = amdgpu_dm_panel_native_mode(&aconnector->base, modes, &native);
+	if (!preferred)
+		preferred = list_first_entry_or_null(modes, struct drm_display_mode, head);
+
+	if (!preferred) {
+		memset(&aconnector->preferred_mode, 0, sizeof(aconnector->preferred_mode));
+		memset(&aconnector->freesync_vid_base, 0, sizeof(aconnector->freesync_vid_base));
+		return;
+	}
+
+	drm_mode_copy(&aconnector->preferred_mode, preferred);
+
+	/*
+	 * The FreeSync video modes differ from their base only in vtotal, and
+	 * atomic_check matches them against this copy. A command line mode at
+	 * the preferred size with a higher refresh rate would win the search
+	 * below, so take the base add_fs_modes() used, if validation kept it
+	 * and it has the preferred mode's size
+	 */
+	if (amdgpu_dm_fs_modes_base_listed(modes, &aconnector->fs_modes_base,
+					   &aconnector->preferred_mode))
+		highest = &aconnector->fs_modes_base;
+	else
+		highest = amdgpu_dm_find_highest_refresh_mode(modes, &aconnector->preferred_mode);
+
+	drm_mode_copy(&aconnector->freesync_vid_base, highest);
+}
+EXPORT_IF_KUNIT(amdgpu_dm_connector_copy_probed_modes);
+
+/*
+ * atomic_check needs the preferred and highest refresh rate modes, but
+ * &drm_mode_config.mutex protects base.modes and atomic_check can't take it.
+ * Copy them while the probe holds it, and take
+ * &drm_mode_config.connection_mutex too, which atomic_check holds
+ */
+int amdgpu_dm_connector_fill_modes(struct drm_connector *connector,
+				   u32 max_width, u32 max_height)
+{
+	struct drm_mode_config *config = &connector->dev->mode_config;
+	int count;
+
+	count = drm_helper_probe_single_connector_modes(connector, max_width,
+							max_height);
+
+	drm_modeset_lock(&config->connection_mutex, NULL);
+	amdgpu_dm_connector_copy_probed_modes(to_amdgpu_dm_connector(connector));
+	drm_modeset_unlock(&config->connection_mutex);
+
+	return count;
+}
+EXPORT_IF_KUNIT(amdgpu_dm_connector_fill_modes);
 
 #if defined(CONFIG_DRM_AMD_DC_FP)
 static void update_dsc_caps(struct amdgpu_dm_connector *aconnector,
@@ -2150,7 +2273,7 @@ EXPORT_IF_KUNIT(amdgpu_dm_connector_funcs_force);
 static const struct drm_connector_funcs amdgpu_dm_connector_funcs = {
 	.reset = amdgpu_dm_connector_funcs_reset,
 	.detect = amdgpu_dm_connector_detect,
-	.fill_modes = drm_helper_probe_single_connector_modes,
+	.fill_modes = amdgpu_dm_connector_fill_modes,
 	.destroy = amdgpu_dm_connector_destroy,
 	.atomic_duplicate_state = amdgpu_dm_connector_atomic_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
@@ -3196,6 +3319,9 @@ STATIC_IFN_KUNIT uint add_fs_modes(struct amdgpu_dm_connector *aconnector)
 			drm_mode_destroy(aconnector->base.dev, new_mode);
 	}
  out:
+	if (new_modes_count)
+		drm_mode_copy(&aconnector->fs_modes_base, m);
+
 	return new_modes_count;
 }
 EXPORT_IF_KUNIT(add_fs_modes);
@@ -3236,6 +3362,8 @@ STATIC_IFN_KUNIT int amdgpu_dm_connector_get_modes(struct drm_connector *connect
 	const struct dc *dc = dc_link->dc;
 
 	encoder = amdgpu_dm_connector_to_encoder(connector);
+	memset(&amdgpu_dm_connector->fs_modes_base, 0,
+	       sizeof(amdgpu_dm_connector->fs_modes_base));
 
 	if (!drm_edid) {
 		amdgpu_dm_connector->num_modes =

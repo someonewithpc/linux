@@ -2457,6 +2457,387 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 			    mode);
 }
 
+/* Tests for amdgpu_dm_connector_copy_probed_modes() */
+
+static struct drm_display_mode *
+dm_test_copy_add_mode(struct kunit *test, struct list_head *modes,
+		      u16 hdisplay, u16 vdisplay, u16 htotal, u16 vtotal,
+		      int clock, u32 type)
+{
+	struct drm_display_mode *mode;
+
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	mode->hdisplay = hdisplay;
+	mode->vdisplay = vdisplay;
+	mode->htotal = htotal;
+	mode->vtotal = vtotal;
+	mode->clock = clock;
+	mode->type = type;
+	list_add_tail(&mode->head, modes);
+
+	return mode;
+}
+
+static struct drm_device *dm_test_alloc_drm(struct kunit *test);
+
+/*
+ * Take the copies as amdgpu_dm_connector_fill_modes() does, with
+ * &drm_mode_config.mutex and &drm_mode_config.connection_mutex held. A
+ * connector without a device gets one for the locks, without registering
+ * the connector with it
+ */
+static void dm_test_copy_locked(struct kunit *test, struct amdgpu_dm_connector *aconnector)
+{
+	struct drm_mode_config *config;
+
+	if (!aconnector->base.dev)
+		aconnector->base.dev = dm_test_alloc_drm(test);
+	config = &aconnector->base.dev->mode_config;
+
+	mutex_lock(&config->mutex);
+	drm_modeset_lock(&config->connection_mutex, NULL);
+	amdgpu_dm_connector_copy_probed_modes(aconnector);
+	drm_modeset_unlock(&config->connection_mutex);
+	mutex_unlock(&config->mutex);
+}
+
+/**
+ * dm_test_highest_refresh_probed_skips_copy - Test a probe reads probed_modes
+ * @test: The KUnit test context
+ *
+ * The copy is from the previous probe, possibly of another monitor, so a
+ * caller that passes use_probed_modes must get this probe's mode
+ */
+static void dm_test_highest_refresh_probed_skips_copy(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+	aconnector->freesync_vid_base.clock = 148500;
+	aconnector->freesync_vid_base.hdisplay = 1920;
+	aconnector->freesync_vid_base.vdisplay = 1080;
+
+	mode = dm_test_copy_add_mode(test, &aconnector->base.probed_modes, 2560, 1440,
+				     2720, 1481, 241500, DRM_MODE_TYPE_PREFERRED);
+
+	KUNIT_EXPECT_PTR_EQ(test,
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true),
+			    mode);
+}
+
+/**
+ * dm_test_copy_probed_modes_highest_refresh - Test the copies taken from base.modes
+ * @test: The KUnit test context
+ *
+ * The preferred mode is copied as is. The highest refresh rate copy comes from
+ * the preferred size only, even when another size has a higher refresh rate
+ */
+static void dm_test_copy_probed_modes_highest_refresh(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+
+	dm_test_copy_add_mode(test, modes, 1280, 720, 1650, 750, 297000, 0);
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 148500,
+			      DRM_MODE_TYPE_PREFERRED);
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 297000, 0);
+
+	dm_test_copy_locked(test, aconnector);
+
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 148500);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_TRUE(test, aconnector->preferred_mode.type & DRM_MODE_TYPE_PREFERRED);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 297000);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.vdisplay, 1080);
+}
+
+/**
+ * dm_test_copy_probed_modes_no_preferred - Test the first mode stands in for a preferred one
+ * @test: The KUnit test context
+ */
+static void dm_test_copy_probed_modes_no_preferred(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 148500, 0);
+	dm_test_copy_add_mode(test, modes, 1280, 720, 1650, 750, 297000, 0);
+
+	dm_test_copy_locked(test, aconnector);
+
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 148500);
+}
+
+/**
+ * dm_test_copy_probed_modes_records_edid - Test the copies record the sink's EDID
+ * @test: The KUnit test context
+ *
+ * atomic_check compares the EDID of the sink it builds a stream for with the
+ * one the copies were taken with
+ */
+static void dm_test_copy_probed_modes_records_edid(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
+	u8 *edid;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	sink = kunit_kzalloc(test, sizeof(*sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	aconnector->dc_sink = sink;
+
+	edid = sink->dc_edid.raw_edid;
+	memset(edid, 0xa5, 256);
+	sink->dc_edid.length = 256;
+
+	dm_test_copy_add_mode(test, &aconnector->base.modes, 1920, 1080, 2200, 1125,
+			      148500, DRM_MODE_TYPE_PREFERRED);
+
+	dm_test_copy_locked(test, aconnector);
+
+	KUNIT_EXPECT_EQ(test, aconnector->mode_copies_edid_len, 256);
+	KUNIT_EXPECT_MEMEQ(test, aconnector->mode_copies_edid, edid, 256);
+}
+
+/**
+ * dm_test_copy_probed_modes_no_edid - Test copies without a sink EDID record none
+ * @test: The KUnit test context
+ *
+ * Without a sink, or with one that has no EDID, nothing identifies the
+ * monitor, so the copies must not match any sink later
+ */
+static void dm_test_copy_probed_modes_no_edid(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	sink = kunit_kzalloc(test, sizeof(*sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	aconnector->mode_copies_edid_len = 128;
+	memset(aconnector->mode_copies_edid, 0x5a, 128);
+
+	dm_test_copy_add_mode(test, &aconnector->base.modes, 1920, 1080, 2200, 1125,
+			      148500, DRM_MODE_TYPE_PREFERRED);
+
+	dm_test_copy_locked(test, aconnector);
+	KUNIT_EXPECT_EQ(test, aconnector->mode_copies_edid_len, 0);
+
+	aconnector->dc_sink = sink;
+	aconnector->mode_copies_edid_len = 128;
+	memset(aconnector->mode_copies_edid, 0x5a, 128);
+
+	dm_test_copy_locked(test, aconnector);
+	KUNIT_EXPECT_EQ(test, aconnector->mode_copies_edid_len, 0);
+}
+
+/**
+ * dm_test_copy_probed_modes_empty - Test an empty mode list clears both copies
+ * @test: The KUnit test context
+ *
+ * A disconnected connector ends its probe with no modes. Copies from an
+ * earlier probe must not survive that
+ */
+static void dm_test_copy_probed_modes_empty(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	aconnector->preferred_mode.clock = 148500;
+	aconnector->freesync_vid_base.clock = 297000;
+
+	dm_test_copy_locked(test, aconnector);
+
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 0);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
+}
+
+/**
+ * dm_test_copy_probed_modes_fs_modes_base - Test the FreeSync base beats a command line mode
+ * @test: The KUnit test context
+ *
+ * A video= mode at the preferred size with a higher refresh rate than any EDID
+ * mode is in base.modes, but the FreeSync video modes were built from
+ * fs_modes_base, so that is the copy atomic_check gets
+ */
+static void dm_test_copy_probed_modes_fs_modes_base(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 148500,
+			      DRM_MODE_TYPE_PREFERRED);
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 297000, 0);
+	dm_test_copy_add_mode(test, modes, 1920, 1080, 2200, 1125, 346500,
+			      DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_USERDEF);
+
+	dm_test_copy_locked(test, aconnector);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 346500);
+
+	aconnector->fs_modes_base.hdisplay = 1920;
+	aconnector->fs_modes_base.vdisplay = 1080;
+	aconnector->fs_modes_base.htotal = 2200;
+	aconnector->fs_modes_base.vtotal = 1125;
+	aconnector->fs_modes_base.clock = 297000;
+
+	dm_test_copy_locked(test, aconnector);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 297000);
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 148500);
+}
+
+/**
+ * dm_test_copy_probed_modes_fs_modes_base_pruned - Test a pruned FreeSync base is not copied
+ * @test: The KUnit test context
+ *
+ * add_fs_modes() records fs_modes_base before validation. If validation pruned
+ * its size, or the base itself, the copy must be the highest refresh rate mode
+ * at the preferred size that base.modes still holds
+ */
+static void dm_test_copy_probed_modes_fs_modes_base_pruned(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct list_head *modes;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	modes = &aconnector->base.modes;
+	INIT_LIST_HEAD(modes);
+
+	dm_test_copy_add_mode(test, modes, 1920, 1200, 2080, 1235, 154000, 0);
+	dm_test_copy_add_mode(test, modes, 1920, 1200, 2080, 1235, 308000, 0);
+
+	aconnector->fs_modes_base.hdisplay = 3840;
+	aconnector->fs_modes_base.vdisplay = 2400;
+	aconnector->fs_modes_base.htotal = 4000;
+	aconnector->fs_modes_base.vtotal = 2469;
+	aconnector->fs_modes_base.clock = 592500;
+
+	dm_test_copy_locked(test, aconnector);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.vdisplay, 1200);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 308000);
+
+	aconnector->fs_modes_base.hdisplay = 1920;
+	aconnector->fs_modes_base.vdisplay = 1200;
+	aconnector->fs_modes_base.htotal = 2080;
+	aconnector->fs_modes_base.vtotal = 1235;
+	aconnector->fs_modes_base.clock = 231000;
+
+	dm_test_copy_locked(test, aconnector);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 308000);
+}
+
+/* Tests for amdgpu_dm_connector_fill_modes() */
+
+static int dm_test_fill_modes_get_modes(struct drm_connector *connector)
+{
+	static const int refresh[] = { 60, 120 };
+	struct drm_display_mode *mode;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(refresh); i++) {
+		mode = drm_cvt_mode(connector->dev, 1920, 1080, refresh[i],
+				    false, false, false);
+		if (!mode)
+			return i;
+		if (i == 0)
+			mode->type |= DRM_MODE_TYPE_PREFERRED;
+		drm_mode_probed_add(connector, mode);
+	}
+
+	return i;
+}
+
+static const struct drm_connector_helper_funcs dm_test_fill_modes_helper_funcs = {
+	.get_modes = dm_test_fill_modes_get_modes,
+};
+
+static const struct drm_connector_funcs dm_test_fill_modes_funcs = {
+	.fill_modes = amdgpu_dm_connector_fill_modes,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+};
+
+/**
+ * dm_test_fill_modes_copies_probe - Test fill_modes copies the modes of its probe
+ * @test: The KUnit test context
+ *
+ * The hook returns the probe helper's mode count and takes the copies and the
+ * sink's EDID from the modes that probe left in base.modes. The copy is
+ * written under connection_mutex, which lockdep checks with PROVE_LOCKING
+ */
+static void dm_test_fill_modes_copies_probe(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_connector *connector;
+	struct drm_device *drm;
+	struct device *dev;
+	struct dc_sink *sink;
+	int count;
+
+	dev = drm_kunit_helper_alloc_device(test);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	drm = __drm_kunit_helper_alloc_drm_device(test, dev, sizeof(*drm), 0,
+						  DRIVER_MODESET);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, drm);
+
+	aconnector = drmm_kzalloc(drm, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	connector = &aconnector->base;
+	KUNIT_ASSERT_EQ(test, drmm_connector_init(drm, connector, &dm_test_fill_modes_funcs,
+						  DRM_MODE_CONNECTOR_HDMIA, NULL), 0);
+	drm_connector_helper_add(connector, &dm_test_fill_modes_helper_funcs);
+
+	sink = kunit_kzalloc(test, sizeof(*sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	memset(sink->dc_edid.raw_edid, 0x5a, 128);
+	sink->dc_edid.length = 128;
+	aconnector->dc_sink = sink;
+
+	mutex_lock(&drm->mode_config.mutex);
+	count = connector->funcs->fill_modes(connector, 4096, 4096);
+	mutex_unlock(&drm->mode_config.mutex);
+
+	KUNIT_EXPECT_EQ(test, count, 2);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, drm_mode_vrefresh(&aconnector->preferred_mode), 60);
+	KUNIT_EXPECT_EQ(test, drm_mode_vrefresh(&aconnector->freesync_vid_base), 120);
+	KUNIT_EXPECT_EQ(test, aconnector->mode_copies_edid_len, 128);
+	KUNIT_EXPECT_MEMEQ(test, aconnector->mode_copies_edid, sink->dc_edid.raw_edid, 128);
+}
+
 /* Tests for amdgpu_dm_is_freesync_video_mode() */
 
 /**
@@ -4800,6 +5181,127 @@ static void dm_test_create_stream_native_mode_no_edid_edp(struct kunit *test)
 							     DM_TEST_NATIVE_NO_EDID));
 }
 
+/*
+ * Copy the modes after a probe with size limits below the native mode. The
+ * probe left a 1920x1200 mode in base.modes, and with @listed also a 3840x2400
+ * mode at half the native clock, while the encoder keeps the 3840x2400 native
+ * mode
+ */
+static struct amdgpu_dm_connector *
+dm_test_copy_pruned(struct kunit *test, int connector_type, bool listed)
+{
+	static const u8 edid[EDID_LENGTH];
+	struct dm_test_stream_ctx *ctx = dm_test_stream_ctx_alloc_type(test, connector_type);
+	struct amdgpu_dm_connector *aconnector = ctx->aconnector;
+	struct list_head *modes = &aconnector->base.modes;
+	struct drm_display_mode *native, *mode;
+	struct amdgpu_encoder *aenc;
+
+	aenc = drmm_kzalloc(ctx->drm, sizeof(*aenc), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aenc);
+	KUNIT_ASSERT_EQ(test, drmm_encoder_init(ctx->drm, &aenc->base, NULL,
+						DRM_MODE_ENCODER_TMDS, NULL), 0);
+	KUNIT_ASSERT_EQ(test, drm_connector_attach_encoder(&aconnector->base, &aenc->base), 0);
+
+	native = &aenc->native_mode;
+	native->clock = 592500;
+	native->hdisplay = 3840;
+	native->hsync_start = 3888;
+	native->hsync_end = 3920;
+	native->htotal = 4000;
+	native->vdisplay = 2400;
+	native->vsync_start = 2403;
+	native->vsync_end = 2409;
+	native->vtotal = 2469;
+
+	mode = drm_mode_duplicate(ctx->drm, native);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+	mode->hdisplay = 1920;
+	mode->vdisplay = 1200;
+	list_add_tail(&mode->head, modes);
+
+	if (listed) {
+		mode = drm_mode_duplicate(ctx->drm, native);
+		KUNIT_ASSERT_NOT_NULL(test, mode);
+		mode->clock /= 2;
+		list_add_tail(&mode->head, modes);
+	}
+
+	aconnector->drm_edid = drm_edid_alloc(edid, sizeof(edid));
+	KUNIT_ASSERT_NOT_NULL(test, aconnector->drm_edid);
+
+	dm_test_copy_locked(test, aconnector);
+
+	drm_edid_free(aconnector->drm_edid);
+	aconnector->drm_edid = NULL;
+
+	return aconnector;
+}
+
+/**
+ * dm_test_copy_probed_modes_pruned_edp - Test eDP copies the encoder's native mode
+ * @test: The KUnit test context
+ *
+ * With the native size pruned from base.modes, the preferred mode copy must be
+ * the panel's native mode, with its CRTC timing set, so that atomic_check
+ * still scales to it
+ */
+static void dm_test_copy_probed_modes_pruned_edp(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector =
+		dm_test_copy_pruned(test, DRM_MODE_CONNECTOR_eDP, false);
+
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 3840);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.vdisplay, 2400);
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 592500);
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.crtc_clock, 592500);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.crtc_htotal, 4000);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->freesync_vid_base.hdisplay, 3840);
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 592500);
+}
+
+/**
+ * dm_test_copy_probed_modes_pruned_lvds - Test LVDS copies the encoder's native mode
+ * @test: The KUnit test context
+ */
+static void dm_test_copy_probed_modes_pruned_lvds(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector =
+		dm_test_copy_pruned(test, DRM_MODE_CONNECTOR_LVDS, false);
+
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 3840);
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 592500);
+}
+
+/**
+ * dm_test_copy_probed_modes_pruned_listed_edp - Test eDP copies a listed native size mode
+ * @test: The KUnit test context
+ *
+ * mode_valid may have rejected the encoder's native timing, so a mode of the
+ * native size left in base.modes must be copied in its place
+ */
+static void dm_test_copy_probed_modes_pruned_listed_edp(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector =
+		dm_test_copy_pruned(test, DRM_MODE_CONNECTOR_eDP, true);
+
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 3840);
+	KUNIT_EXPECT_EQ(test, aconnector->preferred_mode.clock, 296250);
+}
+
+/**
+ * dm_test_copy_probed_modes_pruned_hdmi - Test HDMI copies the first mode
+ * @test: The KUnit test context
+ */
+static void dm_test_copy_probed_modes_pruned_hdmi(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector =
+		dm_test_copy_pruned(test, DRM_MODE_CONNECTOR_HDMIA, true);
+
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.hdisplay, 1920);
+	KUNIT_EXPECT_EQ(test, (int)aconnector->preferred_mode.vdisplay, 1200);
+}
+
 /* Tests for amdgpu_dm_connector_detect() */
 
 /*
@@ -6332,6 +6834,8 @@ static void dm_test_add_fs_modes_generates(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, count, 8);
 	KUNIT_EXPECT_EQ(test, duplicate_count, 0);
+	KUNIT_EXPECT_EQ(test, aconnector->fs_modes_base.clock, 148500);
+	KUNIT_EXPECT_EQ(test, aconnector->fs_modes_base.vtotal, 1125);
 }
 
 /**
@@ -6350,6 +6854,7 @@ static void dm_test_add_fs_modes_out_of_range(struct kunit *test)
 	aconnector->max_vfreq = 120;
 
 	KUNIT_EXPECT_EQ(test, (int)add_fs_modes(aconnector), 0);
+	KUNIT_EXPECT_EQ(test, aconnector->fs_modes_base.clock, 0);
 }
 
 /**
@@ -10576,6 +11081,17 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_highest_refresh_writeback_null),
 	KUNIT_CASE(dm_test_highest_refresh_cached_base),
 	KUNIT_CASE(dm_test_highest_refresh_preferred_mode),
+	KUNIT_CASE(dm_test_highest_refresh_probed_skips_copy),
+	/* amdgpu_dm_connector_copy_probed_modes */
+	KUNIT_CASE(dm_test_copy_probed_modes_highest_refresh),
+	KUNIT_CASE(dm_test_copy_probed_modes_no_preferred),
+	KUNIT_CASE(dm_test_copy_probed_modes_records_edid),
+	KUNIT_CASE(dm_test_copy_probed_modes_no_edid),
+	KUNIT_CASE(dm_test_copy_probed_modes_empty),
+	KUNIT_CASE(dm_test_copy_probed_modes_fs_modes_base),
+	KUNIT_CASE(dm_test_copy_probed_modes_fs_modes_base_pruned),
+	/* amdgpu_dm_connector_fill_modes */
+	KUNIT_CASE(dm_test_fill_modes_copies_probe),
 	/* amdgpu_dm_is_freesync_video_mode */
 	KUNIT_CASE(dm_test_is_freesync_video_mode_null_mode),
 	KUNIT_CASE(dm_test_is_freesync_video_mode_match),
@@ -10664,6 +11180,10 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_stream_native_preferred_edp),
 	KUNIT_CASE(dm_test_create_stream_native_mode_no_clock_edp),
 	KUNIT_CASE(dm_test_create_stream_native_mode_no_edid_edp),
+	KUNIT_CASE(dm_test_copy_probed_modes_pruned_edp),
+	KUNIT_CASE(dm_test_copy_probed_modes_pruned_lvds),
+	KUNIT_CASE(dm_test_copy_probed_modes_pruned_listed_edp),
+	KUNIT_CASE(dm_test_copy_probed_modes_pruned_hdmi),
 	/* amdgpu_dm_connector_detect */
 	KUNIT_CASE(dm_test_detect_force_on),
 	KUNIT_CASE(dm_test_detect_force_on_digital),
