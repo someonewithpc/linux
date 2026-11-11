@@ -1050,6 +1050,62 @@ create_fake_sink(struct drm_device *dev, struct dc_link *link)
 	return sink;
 }
 
+/*
+ * After a probe with size limits smaller than the preferred mode, @modes no
+ * longer has that mode, and the first mode left would become the stream
+ * timing. fbdev emulation probes with limits that video= can set below the
+ * native size. Only eDP and LVDS panels get a fallback here, since they take
+ * only their native size. On other connectors mode_valid can also reject the
+ * preferred mode, and then the first valid mode is the right one
+ *
+ * Take a mode of the native size from @modes if one is left, since mode_valid
+ * may have rejected the preferred timing itself. The probe sorts the list, so
+ * the first one has the highest refresh rate left. If the limits pruned them
+ * all, fill @native_buf from the copy of the preferred mode that
+ * amdgpu_dm_get_native_mode() keeps in the encoder and refreshes on every
+ * probe, before the limits apply
+ *
+ * @native_buf: storage for the native mode when no mode of its size is left
+ * in @modes
+ *
+ * Returns a mode of the native size from @modes if there is one, otherwise
+ * @native_buf filled with the encoder's native mode, or NULL for other
+ * connectors or when the encoder has no native mode
+ */
+static const struct drm_display_mode *
+amdgpu_dm_panel_native_mode(struct drm_connector *connector, struct list_head *modes,
+			    struct drm_display_mode *native_buf)
+{
+	struct amdgpu_dm_connector *aconnector = to_amdgpu_dm_connector(connector);
+	const struct drm_display_mode *enc_native;
+	struct drm_encoder *encoder;
+	struct drm_display_mode *m;
+
+	if (!aconnector->drm_edid ||
+	    (connector->connector_type != DRM_MODE_CONNECTOR_eDP &&
+	     connector->connector_type != DRM_MODE_CONNECTOR_LVDS))
+		return NULL;
+
+	encoder = amdgpu_dm_connector_to_encoder(connector);
+	if (!encoder)
+		return NULL;
+
+	enc_native = &to_amdgpu_encoder(encoder)->native_mode;
+	if (!enc_native->clock)
+		return NULL;
+
+	list_for_each_entry(m, modes, head) {
+		if (m->hdisplay == enc_native->hdisplay &&
+		    m->vdisplay == enc_native->vdisplay)
+			return m;
+	}
+
+	drm_mode_init(native_buf, enc_native);
+	drm_mode_set_crtcinfo(native_buf, CRTC_INTERLACE_HALVE_V);
+
+	return native_buf;
+}
+
 /**
  * DOC: FreeSync Video
  *
@@ -1466,6 +1522,7 @@ EXPORT_IF_KUNIT(amdgpu_dm_update_stream_scaling_settings);
 STATIC_IFN_KUNIT struct dc_stream_state *
 create_stream_for_sink(struct drm_connector *connector,
 		       const struct drm_display_mode *drm_mode,
+		       const struct drm_display_mode *preferred_mode,
 		       const struct dm_connector_state *dm_state,
 		       const struct dc_stream_state *old_stream,
 		       int requested_bpc,
@@ -1474,8 +1531,6 @@ create_stream_for_sink(struct drm_connector *connector,
 {
 	struct drm_device *dev = connector->dev;
 	struct amdgpu_dm_connector *aconnector = NULL;
-	struct drm_display_mode *preferred_mode = NULL;
-	struct drm_display_mode *connector_mode;
 	const struct drm_connector_state *con_state = &dm_state->base;
 	struct dc_stream_state *stream = NULL;
 	struct drm_display_mode mode;
@@ -1531,75 +1586,9 @@ create_stream_for_sink(struct drm_connector *connector,
 	stream->timing.flags.LTE_340MCSC_SCRAMBLE =
 		connector->display_info.hdmi.scdc.scrambling.low_rates;
 
-	list_for_each_entry(connector_mode, &connector->modes, head) {
-		/* Search for preferred mode */
-		if (connector_mode->type & DRM_MODE_TYPE_PREFERRED) {
-			preferred_mode = connector_mode;
-			break;
-		}
-	}
-
-	/*
-	 * After a probe with size limits smaller than the preferred mode,
-	 * connector->modes no longer has that mode, and the first mode left
-	 * would become the stream timing. fbdev emulation probes with limits
-	 * that video= can set below the native size. Only eDP and LVDS panels
-	 * get a fallback here, since they take only their native size. On other
-	 * connectors mode_valid can also reject the preferred mode, and then
-	 * the first valid mode is the right one
-	 *
-	 * Take a mode of the native size from connector->modes if one is left,
-	 * since mode_valid may have rejected the preferred timing itself. The
-	 * probe sorts the list, so the first one has the highest refresh rate
-	 * left. If the limits pruned them all, use the copy of the preferred
-	 * mode that amdgpu_dm_get_native_mode() keeps in the encoder. It is
-	 * made on every probe, before the limits apply
-	 */
-	if (!preferred_mode && aconnector && aconnector->drm_edid &&
-	    (connector->connector_type == DRM_MODE_CONNECTOR_eDP ||
-	     connector->connector_type == DRM_MODE_CONNECTOR_LVDS)) {
-		struct drm_encoder *encoder = amdgpu_dm_connector_to_encoder(connector);
-		const struct drm_display_mode *enc_native =
-			encoder ? &to_amdgpu_encoder(encoder)->native_mode : NULL;
-
-		if (enc_native && enc_native->clock) {
-			list_for_each_entry(connector_mode, &connector->modes, head) {
-				if (connector_mode->hdisplay == enc_native->hdisplay &&
-				    connector_mode->vdisplay == enc_native->vdisplay) {
-					preferred_mode = connector_mode;
-					break;
-				}
-			}
-
-			/*
-			 * saved_mode is only used for FreeSync video modes, and
-			 * that path doesn't read preferred_mode
-			 */
-			if (!preferred_mode) {
-				drm_mode_init(&saved_mode, enc_native);
-				drm_mode_set_crtcinfo(&saved_mode, CRTC_INTERLACE_HALVE_V);
-				preferred_mode = &saved_mode;
-			}
-		}
-	}
-
-	if (!preferred_mode)
-		preferred_mode = list_first_entry_or_null(
-				&connector->modes,
-				struct drm_display_mode,
-				head);
-
 	mode_refresh = drm_mode_vrefresh(&mode);
 
-	if (preferred_mode == NULL) {
-		/*
-		 * This may not be an error, the use case is when we have no
-		 * usermode calls to reset and set mode upon hotplug. In this
-		 * case, we call set mode ourselves to restore the previous mode
-		 * and the modelist may not be filled in time.
-		 */
-		drm_dbg_driver(dev, "No preferred mode found\n");
-	} else if (aconnector) {
+	if (aconnector && preferred_mode) {
 		recalculate_timing = amdgpu_freesync_vid_mode &&
 				 amdgpu_dm_is_freesync_video_mode(&mode, aconnector);
 		if (recalculate_timing) {
@@ -2329,11 +2318,12 @@ dm_validate_stream_color_format(const struct drm_connector_state *drm_state,
 		DC_OK : DC_UNSUPPORTED_VALUE;
 }
 
-struct dc_stream_state *
-amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
-					  const struct drm_display_mode *drm_mode,
-					  const struct dm_connector_state *dm_state,
-					  const struct dc_stream_state *old_stream)
+static struct dc_stream_state *
+__amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
+					    const struct drm_display_mode *drm_mode,
+					    const struct drm_display_mode *preferred_mode,
+					    const struct dm_connector_state *dm_state,
+					    const struct dc_stream_state *old_stream)
 {
 	/*
 	 * Ordered lists of the encodings and bit depths we are willing to
@@ -2375,8 +2365,8 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 	 * meaningful for the writeback path).
 	 */
 	if (!aconnector) {
-		stream = create_stream_for_sink(connector, drm_mode, dm_state,
-						old_stream, requested_bpc,
+		stream = create_stream_for_sink(connector, drm_mode, preferred_mode,
+						dm_state, old_stream, requested_bpc,
 						PIXEL_ENCODING_RGB, is_hdmi_ep);
 		if (!stream)
 			drm_err(adev_to_drm(adev), "Failed to create stream for sink!\n");
@@ -2503,6 +2493,7 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 				    encoding_mask, bpc_mask, requested_bpc);
 
 			stream = create_stream_for_sink(connector, drm_mode,
+							preferred_mode,
 							dm_state, old_stream,
 							bpc, enc, is_hdmi_ep);
 			if (stream == NULL) {
@@ -2544,6 +2535,63 @@ amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 	 */
 	return NULL;
 }
+
+STATIC_IFN_KUNIT const struct drm_display_mode *
+amdgpu_dm_connector_preferred_mode(struct drm_connector *connector,
+				   struct drm_display_mode *native_buf)
+{
+	const struct drm_display_mode *mode;
+
+	if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
+		return NULL;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (mode->type & DRM_MODE_TYPE_PREFERRED)
+			return mode;
+	}
+
+	mode = amdgpu_dm_panel_native_mode(connector, &connector->modes, native_buf);
+	if (mode)
+		return mode;
+
+	mode = list_first_entry_or_null(&connector->modes,
+					struct drm_display_mode, head);
+	if (!mode) {
+		/*
+		 * This may not be an error, the use case is when we have no
+		 * usermode calls to reset and set mode upon hotplug. In this
+		 * case, we call set mode ourselves to restore the previous mode
+		 * and the modelist may not be filled in time
+		 */
+		drm_dbg_driver(connector->dev, "No preferred mode found\n");
+	}
+
+	return mode;
+}
+EXPORT_IF_KUNIT(amdgpu_dm_connector_preferred_mode);
+
+struct dc_stream_state *
+amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
+					  const struct drm_display_mode *drm_mode,
+					  const struct dm_connector_state *dm_state,
+					  const struct dc_stream_state *old_stream)
+{
+	const struct drm_display_mode *preferred_mode;
+	struct drm_display_mode native_buf;
+
+	/*
+	 * __amdgpu_dm_create_validate_stream_for_sink() checks this as well,
+	 * but without a state there is no commit, so skip the preferred mode
+	 * lookup too
+	 */
+	if (!dm_state)
+		return NULL;
+
+	preferred_mode = amdgpu_dm_connector_preferred_mode(connector, &native_buf);
+	return __amdgpu_dm_create_validate_stream_for_sink(connector, drm_mode,
+							   preferred_mode, dm_state,
+							   old_stream);
+}
 EXPORT_IF_KUNIT(amdgpu_dm_create_validate_stream_for_sink);
 
 enum drm_mode_status amdgpu_dm_connector_mode_valid(struct drm_connector *connector,
@@ -2558,6 +2606,7 @@ enum drm_mode_status amdgpu_dm_connector_mode_valid(struct drm_connector *connec
 	 * here via the amdgpu_dm_connector_helper_funcs
 	 */
 	struct amdgpu_dm_connector *aconnector = to_amdgpu_dm_connector(connector);
+	struct dm_connector_state *dm_state = to_dm_connector_state(connector->state);
 
 	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) ||
 			(mode->flags & DRM_MODE_FLAG_DBLSCAN))
@@ -2585,9 +2634,16 @@ enum drm_mode_status amdgpu_dm_connector_mode_valid(struct drm_connector *connec
 
 	drm_mode_set_crtcinfo(test_mode, 0);
 
-	stream = amdgpu_dm_create_validate_stream_for_sink(connector, test_mode,
-						 to_dm_connector_state(connector->state),
-						 NULL);
+	/*
+	 * During a probe connector->modes still holds the previous probe's
+	 * modes, possibly of another sink, and the probe knows its preferred
+	 * mode only once mode_valid has seen every mode. Validate each mode
+	 * with its own timing, even where atomic_check drives another one, the
+	 * preferred mode's with scaling on or the native one for eDP and LVDS
+	 * common modes
+	 */
+	stream = __amdgpu_dm_create_validate_stream_for_sink(connector, test_mode,
+							     NULL, dm_state, NULL);
 	drm_mode_destroy(connector->dev, test_mode);
 	if (stream) {
 		dc_stream_release(stream);
