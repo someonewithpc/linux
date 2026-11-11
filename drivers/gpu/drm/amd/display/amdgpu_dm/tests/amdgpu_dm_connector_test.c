@@ -4277,7 +4277,7 @@ static void dm_test_create_stream_fake_sink_success(struct kunit *test)
 	struct dc_stream_state *stream;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4294,7 +4294,7 @@ static void dm_test_create_stream_sets_dm_context(struct kunit *test)
 	struct dc_stream_state *stream;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4312,7 +4312,7 @@ static void dm_test_create_stream_virtual_signal(struct kunit *test)
 	struct dc_stream_state *stream;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4332,7 +4332,7 @@ static void dm_test_create_stream_scaling_src(struct kunit *test)
 	struct dc_stream_state *stream;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4364,7 +4364,7 @@ static void dm_test_create_stream_existing_sink(struct kunit *test)
 	ctx->aconnector->dc_sink = sink;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4431,6 +4431,8 @@ static void dm_test_create_stream_preferred_mode(struct kunit *test)
 	dm_test_stream_add_mode(test, ctx, DRM_MODE_TYPE_PREFERRED);
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
+					list_first_entry(&ctx->aconnector->base.modes,
+							 struct drm_display_mode, head),
 					ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
@@ -4459,6 +4461,8 @@ static void dm_test_create_stream_scaled_keeps_refresh(struct kunit *test)
 	ctx->dm_state->scaling = RMX_FULL;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
+					list_first_entry(&ctx->aconnector->base.modes,
+							 struct drm_display_mode, head),
 					ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
@@ -4490,7 +4494,7 @@ static void dm_test_create_stream_timing_override(struct kunit *test)
 	ctx->aconnector->timing_requested = timing;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4519,7 +4523,7 @@ static void dm_test_create_stream_dp_vsc_colorimetry(struct kunit *test)
 	ctx->link->dpcd_caps.dprx_feature.bits.VSC_SDP_COLORIMETRY_SUPPORTED = 1;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4547,7 +4551,7 @@ static void dm_test_create_stream_dp_colorimetry_quirk(struct kunit *test)
 	ctx->link->dpcd_caps.dprx_feature.bits.VSC_SDP_COLORIMETRY_SUPPORTED = 1;
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4574,7 +4578,7 @@ static void dm_test_create_stream_hdmi_vsif(struct kunit *test)
 	sink = dm_test_stream_add_sink(test, ctx, SIGNAL_TYPE_HDMI_TYPE_A);
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
-					ctx->dm_state, NULL, 8,
+					NULL, ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
 	KUNIT_ASSERT_NOT_NULL(test, stream);
@@ -4609,8 +4613,8 @@ dm_test_native_mode_stream(struct kunit *test, int connector_type, unsigned int 
 	static const u8 edid[EDID_LENGTH];
 	struct dm_test_stream_ctx *ctx = dm_test_stream_ctx_alloc_type(test, connector_type);
 	struct amdgpu_encoder *aenc;
+	struct drm_display_mode *native, native_buf;
 	struct dc_stream_state *stream;
-	struct drm_display_mode *native;
 
 	aenc = drmm_kzalloc(ctx->drm, sizeof(*aenc), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, aenc);
@@ -4659,6 +4663,8 @@ dm_test_native_mode_stream(struct kunit *test, int connector_type, unsigned int 
 	}
 
 	stream = create_stream_for_sink(&ctx->aconnector->base, ctx->mode,
+					amdgpu_dm_connector_preferred_mode(&ctx->aconnector->base,
+									   &native_buf),
 					ctx->dm_state, NULL, 8,
 					PIXEL_ENCODING_RGB, false);
 
@@ -7477,6 +7483,98 @@ static void dm_test_create_validate_stream_hdmi_rgb_first(struct kunit *test)
 								    c->dm_state,
 								    NULL));
 	KUNIT_EXPECT_EQ(test, (int)dm_test_cvs_first_encoding, (int)PIXEL_ENCODING_RGB);
+}
+
+static u32 dm_test_cvs_first_h_addressable;
+
+static bool dm_test_cvs_record_first_h_addressable(struct timing_generator *tg,
+						   const struct dc_crtc_timing *timing)
+{
+	if (!dm_test_cvs_first_h_addressable)
+		dm_test_cvs_first_h_addressable = timing->h_addressable;
+
+	return false;
+}
+
+/*
+ * A 3840x2160 preferred mode in connector->modes, as a probe of another sink
+ * leaves it until the next probe prunes it
+ */
+static void dm_test_cvs_add_preferred_4k(struct kunit *test, struct dm_test_cvs_dc *c)
+{
+	struct drm_display_mode *pref = drm_mode_create(c->drm);
+
+	KUNIT_ASSERT_NOT_NULL(test, pref);
+	pref->hdisplay = 3840;
+	pref->hsync_start = 4016;
+	pref->hsync_end = 4104;
+	pref->htotal = 4400;
+	pref->vdisplay = 2160;
+	pref->vsync_start = 2168;
+	pref->vsync_end = 2178;
+	pref->vtotal = 2250;
+	pref->clock = 594000;
+	pref->type = DRM_MODE_TYPE_PREFERRED;
+	drm_mode_set_crtcinfo(pref, CRTC_INTERLACE_HALVE_V);
+	list_add_tail(&pref->head, &c->aconnector->base.modes);
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_preferred - Test atomic_check scales to the preferred mode
+ * @test: The KUnit test context
+ *
+ * With scaling on, the stream for a 1920x1080 mode takes the CRTC timing of
+ * the preferred mode in connector->modes
+ */
+static void dm_test_create_validate_stream_scaled_preferred(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
+
+	c->dm_state->scaling = RMX_FULL;
+	dm_test_cvs_add_preferred_4k(test, c);
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
+	dm_test_cvs_first_h_addressable = 0;
+
+	KUNIT_EXPECT_NULL(test,
+			  amdgpu_dm_create_validate_stream_for_sink(&c->aconnector->base,
+								    c->mode,
+								    c->dm_state,
+								    NULL));
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 3840);
+}
+
+/**
+ * dm_test_mode_valid_ignores_preferred_mode - Test mode_valid uses the mode's own timing
+ * @test: The KUnit test context
+ *
+ * During a probe connector->modes still holds the previous sink's preferred
+ * mode. Even with scaling on, the mode is validated with its own 1920x1080
+ * timing rather than that mode's 3840x2160 one
+ */
+static void dm_test_mode_valid_ignores_preferred_mode(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
+	struct dc_sink *em_sink;
+
+	em_sink = kunit_kzalloc(test, sizeof(*em_sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, em_sink);
+	c->aconnector->dc_em_sink = em_sink;
+	c->aconnector->base.force = DRM_FORCE_ON;
+
+	/* drm_connector_cleanup() kfree()s connector->state */
+	KUNIT_ASSERT_NULL(test, c->aconnector->base.state);
+	amdgpu_dm_connector_funcs_reset(&c->aconnector->base);
+	KUNIT_ASSERT_NOT_NULL(test, c->aconnector->base.state);
+	to_dm_connector_state(c->aconnector->base.state)->scaling = RMX_FULL;
+
+	dm_test_cvs_add_preferred_4k(test, c);
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
+	dm_test_cvs_first_h_addressable = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			amdgpu_dm_connector_mode_valid(&c->aconnector->base, c->mode),
+			MODE_ERROR);
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 1920);
 }
 
 /* Further tests for amdgpu_dm_connector_mode_valid() */
@@ -10695,6 +10793,8 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_validate_stream_prune_timing),
 	KUNIT_CASE(dm_test_create_validate_stream_prune_context),
 	KUNIT_CASE(dm_test_create_validate_stream_hdmi_rgb_first),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_preferred),
+	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_mode),
 	/* amdgpu_dm_update_connector_after_detect */
 	KUNIT_CASE(dm_test_update_after_detect_mst_noop),
 	KUNIT_CASE(dm_test_update_after_detect_sink_unchanged),
