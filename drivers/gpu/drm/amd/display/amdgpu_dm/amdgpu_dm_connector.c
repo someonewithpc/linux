@@ -2154,6 +2154,7 @@ STATIC_IFN_KUNIT void amdgpu_dm_connector_funcs_force(struct drm_connector *conn
 		return;
 	}
 
+	drm_edid_free(aconnector->drm_edid);
 	aconnector->drm_edid = drm_edid;
 	/* Update emulated (virtual) sink's EDID */
 	if (dc_em_sink && dc_link) {
@@ -2217,6 +2218,7 @@ STATIC_IFN_KUNIT void create_eml_sink(struct amdgpu_dm_connector *aconnector)
 	if (connector->display_info.is_hdmi)
 		init_params.sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
 
+	drm_edid_free(aconnector->drm_edid);
 	aconnector->drm_edid = drm_edid;
 
 	/* FIXME: Get rid of drm_edid_raw() */

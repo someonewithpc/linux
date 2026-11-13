@@ -8279,6 +8279,44 @@ static void dm_test_funcs_force_reads_edid(struct kunit *test)
 	ctx->aconnector->drm_edid = NULL;
 }
 
+/**
+ * dm_test_funcs_force_replaces_edid - Test force() frees the EDID it replaces
+ * @test: The KUnit test context
+ *
+ * force() runs on every probe of a forced connector, so drm_edid usually
+ * already holds the EDID from the previous probe. force() must free that one
+ * when it caches the new read. The leak itself only shows up under kmemleak
+ */
+static void dm_test_funcs_force_replaces_edid(struct kunit *test)
+{
+	struct dm_test_edid_ctx *ctx =
+		dm_test_edid_ctx_alloc(test, DRM_MODE_CONNECTOR_DisplayPort);
+	const struct drm_edid *old_edid;
+	struct amdgpu_i2c_adapter *i2c;
+
+	i2c = kunit_kzalloc(test, sizeof(*i2c), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, i2c);
+	i2c->base.algo = &dm_test_force_edid_i2c_algo;
+	i2c->base.lock_ops = &dm_test_force_edid_lock_ops;
+	ctx->aconnector->i2c = i2c;
+
+	ctx->link->aux_mode = false;
+	ctx->link->priv = ctx->aconnector;
+	ctx->aconnector->base.force = DRM_FORCE_ON;
+
+	old_edid = drm_edid_alloc(dm_test_uad_edid, sizeof(dm_test_uad_edid));
+	KUNIT_ASSERT_NOT_NULL(test, old_edid);
+	ctx->aconnector->drm_edid = old_edid;
+
+	amdgpu_dm_connector_funcs_force(&ctx->aconnector->base);
+
+	KUNIT_EXPECT_NOT_NULL(test, ctx->aconnector->drm_edid);
+	KUNIT_EXPECT_PTR_NE(test, ctx->aconnector->drm_edid, old_edid);
+
+	drm_edid_free(ctx->aconnector->drm_edid);
+	ctx->aconnector->drm_edid = NULL;
+}
+
 /* Tests for create_eml_sink() with a valid EDID */
 
 /*
@@ -8406,6 +8444,41 @@ static void dm_test_create_eml_sink_force_on_local(struct kunit *test)
 
 	KUNIT_EXPECT_PTR_EQ(test, ctx->aconnector->dc_sink, local_sink);
 	KUNIT_EXPECT_EQ(test, kref_read(&local_sink->refcount), 2);
+
+	drm_edid_free(ctx->aconnector->drm_edid);
+	ctx->aconnector->drm_edid = NULL;
+}
+
+/**
+ * dm_test_create_eml_sink_replaces_edid - Test create_eml_sink() frees the old EDID
+ * @test: The KUnit test context
+ *
+ * On a forced connector, force() caches an EDID before mode_valid() first
+ * calls create_eml_sink(), which reads the EDID again. create_eml_sink() must
+ * free the cached one when it stores its own. The leak itself only shows up
+ * under kmemleak
+ */
+static void dm_test_create_eml_sink_replaces_edid(struct kunit *test)
+{
+	struct dm_test_edid_ctx *ctx =
+		dm_test_edid_ctx_alloc(test, DRM_MODE_CONNECTOR_DisplayPort);
+	const struct drm_edid *old_edid;
+	struct dc_sink *em_sink;
+
+	em_sink = kunit_kzalloc(test, sizeof(*em_sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, em_sink);
+	dm_test_ces_setup(test, ctx, em_sink);
+	ctx->aconnector->base.force = DRM_FORCE_UNSPECIFIED;
+
+	old_edid = drm_edid_alloc(dm_test_uad_edid, sizeof(dm_test_uad_edid));
+	KUNIT_ASSERT_NOT_NULL(test, old_edid);
+	ctx->aconnector->drm_edid = old_edid;
+
+	create_eml_sink(ctx->aconnector);
+
+	KUNIT_EXPECT_NOT_NULL(test, ctx->aconnector->drm_edid);
+	KUNIT_EXPECT_PTR_NE(test, ctx->aconnector->drm_edid, old_edid);
+	KUNIT_EXPECT_PTR_EQ(test, ctx->aconnector->dc_em_sink, em_sink);
 
 	drm_edid_free(ctx->aconnector->drm_edid);
 	ctx->aconnector->drm_edid = NULL;
@@ -10605,12 +10678,14 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_eml_sink_reads_edid),
 	KUNIT_CASE(dm_test_create_eml_sink_force_on_em),
 	KUNIT_CASE(dm_test_create_eml_sink_force_on_local),
+	KUNIT_CASE(dm_test_create_eml_sink_replaces_edid),
 	/* handle_edid_mgmt */
 	KUNIT_CASE(dm_test_handle_edid_mgmt_dp_sets_link_caps),
 	KUNIT_CASE(dm_test_handle_edid_mgmt_non_dp_leaves_caps),
 	/* amdgpu_dm_connector_funcs_force */
 	KUNIT_CASE(dm_test_funcs_force_no_edid),
 	KUNIT_CASE(dm_test_funcs_force_reads_edid),
+	KUNIT_CASE(dm_test_funcs_force_replaces_edid),
 	/* amdgpu_dm_connector_get_modes */
 	KUNIT_CASE(dm_test_get_modes_noedid_default),
 	KUNIT_CASE(dm_test_get_modes_noedid_128b_adds_more),
