@@ -6,6 +6,7 @@
  */
 
 #include <kunit/test.h>
+#include <kunit/test-bug.h>
 
 #include <drm/drm_drv.h>
 #include <drm/drm_atomic_uapi.h>
@@ -2123,6 +2124,71 @@ static void dm_mst_test_connector_early_unregister_releases_sink(struct kunit *t
 	dm_mst_test_fini_child(&child);
 }
 
+struct dm_mst_test_lock_state {
+	struct drm_device *dev;
+	struct drm_modeset_lock *mst_lock;
+	bool mode_config_held;
+	bool mst_lock_held;
+};
+
+static void dm_mst_test_remove_remote_sink_locked(struct dc_link *link,
+						  struct dc_sink *sink)
+{
+	struct dm_mst_test_lock_state *state = kunit_get_current_test()->priv;
+	struct mutex *lock = &state->dev->mode_config.mutex;
+
+	/*
+	 * mutex_is_locked() can't tell which task holds the mutex, but nothing
+	 * else runs during the test. With lockdep, lockdep_assert_held() also
+	 * checks the owner
+	 */
+	lockdep_assert_held(lock);
+	state->mode_config_held = mutex_is_locked(lock);
+	state->mst_lock_held = drm_modeset_is_locked(state->mst_lock);
+	dm_mst_test_remove_remote_sink(link, sink);
+}
+
+/**
+ * dm_mst_test_connector_early_unregister_locks_mode_config - Test sink lock
+ * @test: KUnit test context
+ *
+ * Probe paths read aconnector->dc_sink under &drm_mode_config.mutex, so
+ * amdgpu_dm_mst_connector_early_unregister() must hold that mutex, as well
+ * as the root's mst_mgr.base.lock, while it removes and releases the sink,
+ * and drop both before returning
+ */
+static void dm_mst_test_connector_early_unregister_locks_mode_config(struct kunit *test)
+{
+	struct dm_mst_test_lock_state *state;
+	struct dm_mst_test_child child;
+	struct dc_sink *sink;
+
+	state = kunit_kzalloc(test, sizeof(*state), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, state);
+
+	dm_mst_test_init_child(test, &child);
+	child.link->dc->link_srv->remove_remote_sink =
+		dm_mst_test_remove_remote_sink_locked;
+	state->dev = &child.adev->ddev;
+	state->mst_lock = &child.root->mst_mgr.base.lock;
+	test->priv = state;
+
+	sink = dm_mst_test_alloc_sink(test);
+	child.aconnector->dc_sink = sink;
+	child.link->sink_count = 1;
+
+	amdgpu_dm_mst_connector_early_unregister(&child.aconnector->base);
+
+	KUNIT_EXPECT_EQ(test, dm_mst_test_remove_remote_sink_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, state->mode_config_held);
+	KUNIT_EXPECT_TRUE(test, state->mst_lock_held);
+	KUNIT_EXPECT_FALSE(test, mutex_is_locked(&state->dev->mode_config.mutex));
+	KUNIT_EXPECT_FALSE(test, drm_modeset_is_locked(state->mst_lock));
+	KUNIT_EXPECT_NULL(test, child.aconnector->dc_sink);
+
+	dm_mst_test_fini_child(&child);
+}
+
 /* Tests for dm_dp_mst_connector_destroy */
 
 /*
@@ -4121,6 +4187,7 @@ static struct kunit_case dm_mst_types_test_cases[] = {
 	/* amdgpu_dm_mst_connector_early_unregister tests */
 	KUNIT_CASE(dm_mst_test_connector_early_unregister_no_sink),
 	KUNIT_CASE(dm_mst_test_connector_early_unregister_releases_sink),
+	KUNIT_CASE(dm_mst_test_connector_early_unregister_locks_mode_config),
 	/* dm_dp_mst_connector_destroy tests */
 	KUNIT_CASE(dm_mst_test_connector_destroy_no_sink),
 	KUNIT_CASE(dm_mst_test_connector_destroy_releases_sink),

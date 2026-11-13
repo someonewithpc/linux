@@ -228,15 +228,19 @@ amdgpu_dm_mst_connector_early_unregister(struct drm_connector *connector)
 	struct drm_dp_mst_port *port = aconnector->mst_output_port;
 	struct amdgpu_dm_connector *root = aconnector->mst_root;
 	struct dc_link *dc_link = aconnector->dc_link;
-	struct dc_sink *dc_sink = aconnector->dc_sink;
+	struct dc_sink *dc_sink;
 
 	drm_dp_mst_connector_early_unregister(connector, port);
 
 	/*
 	 * Release dc_sink for connector which its attached port is
-	 * no longer in the mst topology
+	 * no longer in the mst topology. The probe callbacks read dc_sink
+	 * under &drm_mode_config.mutex, and drm_dp_mst_detect_port() takes
+	 * mst_mgr.base.lock under it, so take the mutex first
 	 */
+	mutex_lock(&connector->dev->mode_config.mutex);
 	drm_modeset_lock(&root->mst_mgr.base.lock, NULL);
+	dc_sink = aconnector->dc_sink;
 	if (dc_sink) {
 		if (dc_link->sink_count)
 			dc_link_remove_remote_sink(dc_link, dc_sink);
@@ -252,6 +256,7 @@ amdgpu_dm_mst_connector_early_unregister(struct drm_connector *connector)
 
 	aconnector->mst_status = MST_STATUS_DEFAULT;
 	drm_modeset_unlock(&root->mst_mgr.base.lock);
+	mutex_unlock(&connector->dev->mode_config.mutex);
 }
 EXPORT_IF_KUNIT(amdgpu_dm_mst_connector_early_unregister);
 
