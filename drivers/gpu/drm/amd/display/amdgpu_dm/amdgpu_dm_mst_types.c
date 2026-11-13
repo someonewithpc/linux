@@ -2027,9 +2027,6 @@ enum dc_status dm_dp_mst_is_port_support_mode(
 	struct dc_dsc_config_options dsc_options = {0};
 	uint32_t stream_kbps;
 
-	if (!aconnector->dc_sink)
-		return DC_FAIL_BANDWIDTH_VALIDATE;
-
 	/* DSC unnecessary case
 	 * Check if timing could be supported within end-to-end BW
 	 */
@@ -2127,12 +2124,12 @@ enum dc_status dm_dp_mst_is_port_support_mode(
 		case PIXEL_ENCODING_RGB:
 		case PIXEL_ENCODING_YCBCR444:
 			branch_max_throughput_mps =
-				aconnector->dc_sink->dsc_caps.dsc_dec_caps.branch_overall_throughput_0_mps;
+				stream->sink->dsc_caps.dsc_dec_caps.branch_overall_throughput_0_mps;
 			break;
 		case PIXEL_ENCODING_YCBCR422:
 		case PIXEL_ENCODING_YCBCR420:
 			branch_max_throughput_mps =
-				aconnector->dc_sink->dsc_caps.dsc_dec_caps.branch_overall_throughput_1_mps;
+				stream->sink->dsc_caps.dsc_dec_caps.branch_overall_throughput_1_mps;
 			break;
 		default:
 			break;

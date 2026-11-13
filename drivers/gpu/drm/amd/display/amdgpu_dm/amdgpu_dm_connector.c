@@ -1672,15 +1672,41 @@ void amdgpu_dm_update_stream_scaling_settings(struct drm_device *dev,
 }
 EXPORT_IF_KUNIT(amdgpu_dm_update_stream_scaling_settings);
 
-STATIC_IFN_KUNIT struct dc_stream_state *
-create_stream_for_sink(struct drm_connector *connector,
-		       const struct drm_display_mode *drm_mode,
-		       const struct drm_display_mode *preferred_mode,
-		       const struct dm_connector_state *dm_state,
-		       const struct dc_stream_state *old_stream,
-		       int requested_bpc,
-		       enum dc_pixel_encoding requested_encoding,
-		       bool is_hdmi_ep)
+/*
+ * A reference on the sink to build streams for: the connector's dc_sink, or a
+ * fake sink without one
+ */
+static struct dc_sink *get_stream_sink(struct drm_connector *connector)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_writeback_connector *wbcon;
+	struct dc_sink *sink;
+
+	if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK) {
+		wbcon = drm_connector_to_writeback(connector);
+		return create_fake_sink(connector->dev,
+					to_amdgpu_dm_wb_connector(wbcon)->link);
+	}
+
+	aconnector = to_amdgpu_dm_connector(connector);
+	sink = aconnector->dc_sink;
+	if (!sink)
+		return create_fake_sink(connector->dev, aconnector->dc_link);
+
+	dc_sink_retain(sink);
+	return sink;
+}
+
+static struct dc_stream_state *
+create_stream_for_dc_sink(struct drm_connector *connector,
+			  struct dc_sink *sink,
+			  const struct drm_display_mode *drm_mode,
+			  const struct drm_display_mode *preferred_mode,
+			  const struct dm_connector_state *dm_state,
+			  const struct dc_stream_state *old_stream,
+			  int requested_bpc,
+			  enum dc_pixel_encoding requested_encoding,
+			  bool is_hdmi_ep)
 {
 	struct drm_device *dev = connector->dev;
 	struct amdgpu_dm_connector *aconnector = NULL;
@@ -1697,40 +1723,18 @@ create_stream_for_sink(struct drm_connector *connector,
 #if defined(CONFIG_DRM_AMD_DC_FP)
 	struct dsc_dec_dpcd_caps dsc_caps = {0};
 #endif
-	struct dc_link *link = NULL;
-	struct dc_sink *sink = NULL;
 
 	drm_mode_init(&mode, drm_mode);
 	memset(&saved_mode, 0, sizeof(saved_mode));
 
-	if (connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK) {
-		aconnector = NULL;
+	if (connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK)
 		aconnector = to_amdgpu_dm_connector(connector);
-		link = aconnector->dc_link;
-	} else {
-		struct drm_writeback_connector *wbcon = NULL;
-		struct amdgpu_dm_wb_connector *dm_wbcon = NULL;
-
-		wbcon = drm_connector_to_writeback(connector);
-		dm_wbcon = to_amdgpu_dm_wb_connector(wbcon);
-		link = dm_wbcon->link;
-	}
-
-	if (!aconnector || !aconnector->dc_sink) {
-		sink = create_fake_sink(dev, link);
-		if (!sink)
-			return stream;
-
-	} else {
-		sink = aconnector->dc_sink;
-		dc_sink_retain(sink);
-	}
 
 	stream = dc_create_stream_for_sink(sink);
 
 	if (stream == NULL) {
 		drm_err(dev, "Failed to create stream for sink!\n");
-		goto finish;
+		return NULL;
 	}
 
 	/* We leave this NULL for writeback connectors */
@@ -1789,7 +1793,7 @@ create_stream_for_sink(struct drm_connector *connector,
 
 	/* The rest isn't needed for writeback connectors */
 	if (!aconnector)
-		goto finish;
+		return stream;
 
 	if (aconnector->timing_changed) {
 		drm_dbg(aconnector->base.dev,
@@ -1822,13 +1826,8 @@ create_stream_for_sink(struct drm_connector *connector,
 	if (stream->signal == SIGNAL_TYPE_DISPLAY_PORT ||
 	    stream->signal == SIGNAL_TYPE_DISPLAY_PORT_MST ||
 	    stream->signal == SIGNAL_TYPE_EDP) {
-		const struct dc_edid_caps *edid_caps;
-		unsigned int disable_colorimetry = 0;
-
-		if (aconnector->dc_sink) {
-			edid_caps = &aconnector->dc_sink->edid_caps;
-			disable_colorimetry = edid_caps->panel_patch.disable_colorimetry;
-		}
+		unsigned int disable_colorimetry =
+			sink->edid_caps.panel_patch.disable_colorimetry;
 
 		/*
 		 * should decide stream support vsc sdp colorimetry capability
@@ -1844,7 +1843,29 @@ create_stream_for_sink(struct drm_connector *connector,
 		aconnector->sr_skip_count = AMDGPU_DM_PSR_ENTRY_DELAY;
 
 	}
-finish:
+
+	return stream;
+}
+
+STATIC_IFN_KUNIT struct dc_stream_state *
+create_stream_for_sink(struct drm_connector *connector,
+		       const struct drm_display_mode *drm_mode,
+		       const struct drm_display_mode *preferred_mode,
+		       const struct dm_connector_state *dm_state,
+		       const struct dc_stream_state *old_stream,
+		       int requested_bpc,
+		       enum dc_pixel_encoding requested_encoding,
+		       bool is_hdmi_ep)
+{
+	struct dc_sink *sink = get_stream_sink(connector);
+	struct dc_stream_state *stream;
+
+	if (!sink)
+		return NULL;
+
+	stream = create_stream_for_dc_sink(connector, sink, drm_mode, preferred_mode,
+					   dm_state, old_stream, requested_bpc,
+					   requested_encoding, is_hdmi_ep);
 	dc_sink_release(sink);
 
 	return stream;
@@ -2508,6 +2529,7 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 	struct amdgpu_device *adev = drm_to_adev(connector->dev);
 	const struct drm_display_info *info = &connector->display_info;
 	struct dc_stream_state *stream = NULL;
+	struct dc_sink *sink;
 	const struct drm_connector_state *drm_state = dm_state ? &dm_state->base : NULL;
 	int requested_bpc = drm_state ? drm_state->max_requested_bpc : 8;
 	enum dc_status dc_result = DC_OK;
@@ -2538,6 +2560,18 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 			drm_err(adev_to_drm(adev), "Failed to create stream for sink!\n");
 		return stream;
 	}
+
+	/*
+	 * A hotplug may swap dc_sink, so build every candidate for the same
+	 * sink. Without one, they share a fake sink made for the first
+	 * candidate, so a mode left with no candidate allocates nothing. That
+	 * calls create_fake_sink() and not get_stream_sink(), which would read
+	 * dc_sink again. The probe updates display_info under
+	 * &drm_mode_config.mutex, so it isn't pinned this way
+	 */
+	sink = aconnector->dc_sink;
+	if (sink)
+		dc_sink_retain(sink);
 
 	signal = aconnector->dc_link->connector_signal;
 
@@ -2639,7 +2673,7 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 	 * types and needs no encoding-specific fallback afterwards.
 	 *
 	 * The selection lives entirely on the stack and is passed by value to
-	 * create_stream_for_sink(); no shared connector state is mutated. This
+	 * create_stream_for_dc_sink(); no shared connector state is mutated. This
 	 * matters because this helper runs concurrently from the connector
 	 * probe worker (->mode_valid) and from a compositor's atomic check on
 	 * the same connector.
@@ -2661,13 +2695,16 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 				    dc_pixel_encoding_to_str(enc), bpc,
 				    encoding_mask, bpc_mask, requested_bpc);
 
-			stream = create_stream_for_sink(connector, drm_mode,
-							preferred_mode,
-							dm_state, old_stream,
-							bpc, enc, is_hdmi_ep);
+			if (!sink)
+				sink = create_fake_sink(connector->dev, aconnector->dc_link);
+			if (sink)
+				stream = create_stream_for_dc_sink(connector, sink,
+								   drm_mode, preferred_mode,
+								   dm_state, old_stream,
+								   bpc, enc, is_hdmi_ep);
 			if (stream == NULL) {
 				drm_err(adev_to_drm(adev), "Failed to create stream for sink!\n");
-				return NULL;
+				goto out;
 			}
 
 			dc_result = dc_validate_stream(adev->dm.dc, stream);
@@ -2683,7 +2720,7 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 				dc_result = dm_validate_stream_color_format(drm_state, stream);
 
 			if (dc_result == DC_OK)
-				return stream;
+				goto out;
 
 			drm_dbg_kms(connector->dev, "Pruned mode %d x %d (refresh rate %d) %s %s -- %s\n",
 				      drm_mode->hdisplay,
@@ -2700,9 +2737,14 @@ amdgpu_dm_create_validate_stream(struct drm_connector *connector,
 
 	/*
 	 * Every sink-supported combination was exhausted without validating;
-	 * the mode is genuinely unsupported on this link.
+	 * the mode is genuinely unsupported on this link, and stream is NULL
 	 */
-	return NULL;
+out:
+	/* A validated stream holds its own reference on the sink */
+	if (sink)
+		dc_sink_release(sink);
+
+	return stream;
 }
 
 /*
