@@ -10222,23 +10222,16 @@ static const struct drm_connector_helper_funcs dm_test_force_conn_helper_funcs =
 struct dm_test_force_ctx {
 	struct drm_device *drm;
 	struct amdgpu_dm_connector *aconnector;
-	struct drm_modeset_acquire_ctx acquire_ctx;
 };
-
-static void dm_test_force_drop_locks(void *data)
-{
-	struct dm_test_force_ctx *ctx = data;
-
-	ctx->drm->mode_config.acquire_ctx = NULL;
-	drm_modeset_drop_locks(&ctx->acquire_ctx);
-	drm_modeset_acquire_fini(&ctx->acquire_ctx);
-}
 
 /*
  * Build a disabled but fully initialized pipe: a primary plane, a CRTC (whose
  * drm_crtc is the first member of amdgpu_crtc, so to_amdgpu_crtc() resolves)
  * and a connector wired to an encoder that still points at the CRTC, which is
- * the state dm_force_atomic_commit() is asked to restore.
+ * the state dm_force_atomic_commit() is asked to restore. Every caller of
+ * dm_force_atomic_commit() holds drm_modeset_lock_all(), so the tests do too.
+ * They take and drop it in the test body, because KUnit runs cleanup actions
+ * in another task and mutexes must be released by their owner
  */
 static struct dm_test_force_ctx *
 dm_test_force_ctx_alloc(struct kunit *test, const struct drm_connector_funcs *funcs)
@@ -10283,11 +10276,6 @@ dm_test_force_ctx_alloc(struct kunit *test, const struct drm_connector_funcs *fu
 
 	drm_mode_config_reset(ctx->drm);
 
-	drm_modeset_acquire_init(&ctx->acquire_ctx, 0);
-	ctx->drm->mode_config.acquire_ctx = &ctx->acquire_ctx;
-	KUNIT_ASSERT_EQ(test,
-			kunit_add_action_or_reset(test, dm_test_force_drop_locks, ctx), 0);
-
 	return ctx;
 }
 
@@ -10304,7 +10292,39 @@ static void dm_test_force_commit_succeeds(struct kunit *test)
 	struct dm_test_force_ctx *ctx =
 		dm_test_force_ctx_alloc(test, &dm_test_connector_funcs);
 
+	drm_modeset_lock_all(ctx->drm);
 	KUNIT_EXPECT_EQ(test, dm_force_atomic_commit(&ctx->aconnector->base), 0);
+	drm_modeset_unlock_all(ctx->drm);
+}
+
+/**
+ * dm_test_force_commit_any_stamp - Test the forced restore under every acquire stamp
+ * @test: The KUnit test context
+ *
+ * With CONFIG_DEBUG_WW_MUTEX_SLOWPATH, ww_mutex_lock() fails a newly taken
+ * lock with -EDEADLK after a countdown seeded from the low four bits of the
+ * acquire stamp. drm_modeset_lock_all() backs off from those itself, so the
+ * commit only sees one if it takes a lock drm_modeset_lock_all() doesn't
+ * hold. Whether a single run catches that depends on the seed, so run the
+ * commit under sixteen consecutive acquire contexts, which go through every
+ * seed when nothing else takes a stamp in between. The commit clears the
+ * legacy encoder links, so each run puts them back first
+ */
+static void dm_test_force_commit_any_stamp(struct kunit *test)
+{
+	struct dm_test_force_ctx *ctx =
+		dm_test_force_ctx_alloc(test, &dm_test_connector_funcs);
+	struct drm_encoder *encoder = ctx->aconnector->base.encoder;
+	struct drm_crtc *crtc = encoder->crtc;
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		ctx->aconnector->base.encoder = encoder;
+		encoder->crtc = crtc;
+		drm_modeset_lock_all(ctx->drm);
+		KUNIT_EXPECT_EQ(test, dm_force_atomic_commit(&ctx->aconnector->base), 0);
+		drm_modeset_unlock_all(ctx->drm);
+	}
 }
 
 /**
@@ -10319,7 +10339,9 @@ static void dm_test_force_commit_conn_state_error(struct kunit *test)
 	struct dm_test_force_ctx *ctx =
 		dm_test_force_ctx_alloc(test, &dm_test_force_fail_funcs);
 
+	drm_modeset_lock_all(ctx->drm);
 	KUNIT_EXPECT_EQ(test, dm_force_atomic_commit(&ctx->aconnector->base), -ENOMEM);
+	drm_modeset_unlock_all(ctx->drm);
 }
 
 static struct kunit_case amdgpu_dm_connector_tests[] = {
@@ -10751,6 +10773,7 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_conn_init_get_modes_hook),
 	/* dm_force_atomic_commit */
 	KUNIT_CASE(dm_test_force_commit_succeeds),
+	KUNIT_CASE(dm_test_force_commit_any_stamp),
 	KUNIT_CASE(dm_test_force_commit_conn_state_error),
 	{}
 };
