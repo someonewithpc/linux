@@ -1924,7 +1924,8 @@ EXPORT_IF_KUNIT(create_stream_for_sink);
  * re-running it on normal polls to prevent visible glitches, unless
  * @force is set.
  *
- * Return: The probed connector status (connected/disconnected/unknown).
+ * Return: The probed connector status (connected/disconnected/unknown), or
+ * the current status when hpd_lock is busy
  */
 STATIC_IFN_KUNIT enum drm_connector_status
 amdgpu_dm_connector_poll(struct amdgpu_dm_connector *aconnector, bool force)
@@ -1946,7 +1947,13 @@ amdgpu_dm_connector_poll(struct amdgpu_dm_connector *aconnector, bool force)
 	if (!force && link->local_sink && link->type == dc_connection_analog_load)
 		return connector->status;
 
-	mutex_lock(&aconnector->hpd_lock);
+	/*
+	 * The poll worker holds mode_config.mutex here, and the HPD handler
+	 * takes mode_config.mutex under hpd_lock. Keep the old status rather
+	 * than wait, and let the next poll retry
+	 */
+	if (!mutex_trylock(&aconnector->hpd_lock))
+		return connector->status;
 
 	if (dc_link_detect_connection_type(aconnector->dc_link, &conn_type) &&
 	    conn_type != dc_connection_none) {
