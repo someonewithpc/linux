@@ -4229,6 +4229,31 @@ static void iwl_pcie_check_me_status(struct iwl_trans *trans)
 	schedule_delayed_work(&trans_pcie->me_recheck_wk, HZ);
 }
 
+/*
+ * Firmware left running on the device, as after a platform hang in D3, can
+ * keep the MAC clock off through FLR, bus and link resets until the device
+ * loses power. Forcing an NMI makes it let go.
+ */
+static int iwl_pcie_wake_stuck_nic(struct iwl_trans *trans)
+{
+	int ret;
+
+	IWL_WARN(trans, "Failed to wake NIC, forcing NMI and resetting\n");
+
+	iwl_trans_set_bit(trans, CSR_RESET, CSR_RESET_REG_FLAG_FORCE_NMI);
+	msleep(500);
+
+	ret = iwl_trans_pcie_sw_reset(trans, true);
+	if (ret)
+		return ret;
+
+	ret = iwl_trans_activate_nic(trans);
+	if (!ret)
+		IWL_INFO(trans, "NIC woke up after NMI\n");
+
+	return ret;
+}
+
 int iwl_pci_gen1_2_probe(struct pci_dev *pdev,
 			 const struct pci_device_id *ent,
 			 const struct iwl_mac_cfg *mac_cfg,
@@ -4265,6 +4290,8 @@ int iwl_pci_gen1_2_probe(struct pci_dev *pdev,
 	ret = iwl_pcie_prepare_card_hw(iwl_trans);
 	if (!ret) {
 		ret = iwl_trans_activate_nic(iwl_trans);
+		if (ret)
+			ret = iwl_pcie_wake_stuck_nic(iwl_trans);
 		if (ret)
 			goto out_free_trans;
 		if (iwl_trans_grab_nic_access(iwl_trans)) {
