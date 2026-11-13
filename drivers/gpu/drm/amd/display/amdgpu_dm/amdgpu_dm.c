@@ -2064,9 +2064,11 @@ static int dm_resume(struct amdgpu_ip_block *ip_block)
 		if (aconnector->fake_enable && aconnector->dc_link->local_sink)
 			aconnector->fake_enable = false;
 
-		if (aconnector->dc_sink)
-			dc_sink_release(aconnector->dc_sink);
-		aconnector->dc_sink = NULL;
+		scoped_guard(mutex, &ddev->mode_config.mutex) {
+			if (aconnector->dc_sink)
+				dc_sink_release(aconnector->dc_sink);
+			aconnector->dc_sink = NULL;
+		}
 		amdgpu_dm_update_connector_after_detect(aconnector);
 	}
 	drm_connector_list_iter_end(&iter);
