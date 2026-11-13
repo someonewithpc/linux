@@ -1503,10 +1503,73 @@ static void dm_test_brightness_range_zero_signals(struct kunit *test)
 	caps.min_input_signal = 0;
 	caps.max_input_signal = 0;
 
-	/* Both signals zero → min=max=0 */
+	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 0);
+	KUNIT_EXPECT_EQ(test, min, 99U);
+	KUNIT_EXPECT_EQ(test, max, 99U);
+}
+
+/**
+ * dm_test_brightness_range_pwm_inverted - Test Brightness range with min above max
+ * @test: The KUnit test context
+ */
+static void dm_test_brightness_range_pwm_inverted(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int min = 99, max = 99;
+
+	caps.aux_support = false;
+	caps.min_input_signal = 200;
+	caps.max_input_signal = 100;
+
+	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 0);
+	KUNIT_EXPECT_EQ(test, min, 99U);
+	KUNIT_EXPECT_EQ(test, max, 99U);
+}
+
+/**
+ * dm_test_brightness_range_aux_empty - Test Brightness range with empty aux limits
+ * @test: The KUnit test context
+ */
+static void dm_test_brightness_range_aux_empty(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	unsigned int min = 99, max = 99;
+
+	caps.aux_support = true;
+	caps.aux_min_input_signal = 600;
+	caps.aux_max_input_signal = 600;
+
 	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 1);
-	KUNIT_EXPECT_EQ(test, min, 0U);
-	KUNIT_EXPECT_EQ(test, max, 0U);
+	KUNIT_EXPECT_EQ(test, min, 1000U * AMDGPU_DM_DEFAULT_AUX_MIN_NITS);
+	KUNIT_EXPECT_EQ(test, max, 1000U * AMDGPU_DM_DEFAULT_AUX_MAX_NITS);
+
+	caps.aux_min_input_signal = 600;
+	caps.aux_max_input_signal = 300;
+
+	KUNIT_EXPECT_EQ(test, get_brightness_range(&caps, &min, &max), 1);
+	KUNIT_EXPECT_EQ(test, min, 1000U * AMDGPU_DM_DEFAULT_AUX_MIN_NITS);
+	KUNIT_EXPECT_EQ(test, max, 1000U * AMDGPU_DM_DEFAULT_AUX_MAX_NITS);
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, max), max);
+}
+
+/**
+ * dm_test_brightness_empty_range_passthrough - Test conversions with an empty range
+ * @test: The KUnit test context
+ */
+static void dm_test_brightness_empty_range_passthrough(struct kunit *test)
+{
+	struct amdgpu_dm_backlight_caps caps = {};
+	struct backlight_properties props = {};
+
+	caps.aux_support = false;
+	caps.min_input_signal = 0;
+	caps.max_input_signal = 0;
+
+	KUNIT_EXPECT_EQ(test, convert_brightness_to_user(&caps, 42), 42U);
+
+	amdgpu_dm_backlight_fill_props(&caps, false, false, &props);
+	KUNIT_EXPECT_EQ(test, props.brightness, MAX_BACKLIGHT_LEVEL);
+	KUNIT_EXPECT_EQ(test, props.max_brightness, MAX_BACKLIGHT_LEVEL);
 }
 
 /* Tests for amdgpu_dm_backlight_fill_props() */
@@ -2054,6 +2117,9 @@ static struct kunit_case dm_backlight_test_cases[] = {
 	KUNIT_CASE(dm_test_brightness_from_user_midrange),
 	KUNIT_CASE(dm_test_brightness_from_user_with_curve),
 	KUNIT_CASE(dm_test_brightness_range_zero_signals),
+	KUNIT_CASE(dm_test_brightness_range_pwm_inverted),
+	KUNIT_CASE(dm_test_brightness_range_aux_empty),
+	KUNIT_CASE(dm_test_brightness_empty_range_passthrough),
 	/* amdgpu_dm_backlight_fill_props */
 	KUNIT_CASE(dm_test_backlight_fill_props_ac_linear),
 	KUNIT_CASE(dm_test_backlight_fill_props_dc_nonlinear),

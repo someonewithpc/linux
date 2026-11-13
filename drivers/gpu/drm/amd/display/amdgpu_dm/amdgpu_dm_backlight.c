@@ -100,18 +100,35 @@ STATIC_IFN_KUNIT
 int get_brightness_range(const struct amdgpu_dm_backlight_caps *caps,
 			 unsigned int *min, unsigned int *max)
 {
+	unsigned int lo, hi;
+
 	if (!caps)
 		return 0;
 
 	if (caps->aux_support) {
 		/* Firmware limits are in nits, DC API wants millinits. */
-		*max = 1000 * caps->aux_max_input_signal;
-		*min = 1000 * caps->aux_min_input_signal;
+		hi = 1000 * caps->aux_max_input_signal;
+		lo = 1000 * caps->aux_min_input_signal;
+		/*
+		 * Callers fall back to the 16-bit PWM scale on failure, so
+		 * give an empty AUX range the one used when EDID has none
+		 */
+		if (hi <= lo) {
+			hi = 1000 * AMDGPU_DM_DEFAULT_AUX_MAX_NITS;
+			lo = 1000 * AMDGPU_DM_DEFAULT_AUX_MIN_NITS;
+		}
 	} else {
 		/* Firmware limits are 8-bit, PWM control is 16-bit. */
-		*max = 0x101 * caps->max_input_signal;
-		*min = 0x101 * caps->min_input_signal;
+		hi = 0x101 * caps->max_input_signal;
+		lo = 0x101 * caps->min_input_signal;
 	}
+
+	/* Callers divide by max and by max - min */
+	if (hi <= lo)
+		return 0;
+
+	*max = hi;
+	*min = lo;
 	return 1;
 }
 EXPORT_IF_KUNIT(get_brightness_range);
@@ -621,12 +638,12 @@ void amdgpu_dm_update_connector_ext_caps(struct amdgpu_dm_connector *aconnector)
 	if (luminance_range->max_luminance)
 		caps->aux_max_input_signal = luminance_range->max_luminance;
 	else
-		caps->aux_max_input_signal = 512;
+		caps->aux_max_input_signal = AMDGPU_DM_DEFAULT_AUX_MAX_NITS;
 
 	if (luminance_range->min_luminance)
 		caps->aux_min_input_signal = luminance_range->min_luminance;
 	else
-		caps->aux_min_input_signal = 1;
+		caps->aux_min_input_signal = AMDGPU_DM_DEFAULT_AUX_MIN_NITS;
 
 	if (!IS_ERR_OR_NULL(panel_backlight_quirk)) {
 		if (panel_backlight_quirk->min_brightness) {
