@@ -1010,7 +1010,8 @@ copy_crtc_timing_for_drm_display_mode(const struct drm_display_mode *src_mode,
 }
 EXPORT_IF_KUNIT(copy_crtc_timing_for_drm_display_mode);
 
-STATIC_IFN_KUNIT void
+/* Return true if @drm_mode took the CRTC timing of @native_mode */
+STATIC_IFN_KUNIT bool
 decide_crtc_timing_for_drm_display_mode(struct drm_display_mode *drm_mode,
 					const struct drm_display_mode *native_mode,
 					bool scale_enabled)
@@ -1024,11 +1025,15 @@ decide_crtc_timing_for_drm_display_mode(struct drm_display_mode *drm_mode,
 	    native_mode->hsync_end == drm_mode->hsync_end &&
 	    native_mode->vsync_start == drm_mode->vsync_start &&
 	    native_mode->vsync_end == drm_mode->vsync_end)) {
-		if (native_mode->crtc_clock)
+		if (native_mode->crtc_clock) {
 			copy_crtc_timing_for_drm_display_mode(native_mode, drm_mode);
+			return true;
+		}
 	} else {
 		/* no scaling nor amdgpu inserted, no need to patch */
 	}
+
+	return false;
 }
 EXPORT_IF_KUNIT(decide_crtc_timing_for_drm_display_mode);
 
@@ -1678,6 +1683,69 @@ void amdgpu_dm_update_stream_scaling_settings(struct drm_device *dev,
 EXPORT_IF_KUNIT(amdgpu_dm_update_stream_scaling_settings);
 
 /*
+ * Fill @mode with the timing a stream for @drm_mode on @sink drives. A FreeSync
+ * video variant drives its base, with its own aspect ratio. With scaling, or
+ * for a mode with the same totals, the stream takes the CRTC timing of the
+ * preferred mode copy. Return the mode whose VIC, aspect ratio and sync
+ * polarity the stream signals: the preferred mode copy if the stream drives it
+ * in place of another timing, else @mode. Set @preferred_refresh to the
+ * refresh rate of the preferred mode copy if the stream may take its timing,
+ * else 0
+ */
+static const struct drm_display_mode *
+stream_timing_mode(struct amdgpu_dm_connector *aconnector,
+		   const struct drm_display_mode *drm_mode,
+		   const struct drm_display_mode *preferred_mode,
+		   bool scale, const struct dc_sink *sink,
+		   struct drm_display_mode *mode, int *preferred_refresh)
+{
+	const struct drm_display_mode *freesync_mode = NULL;
+
+	drm_mode_init(mode, drm_mode);
+	*preferred_refresh = 0;
+
+	if (!aconnector || !preferred_mode)
+		return mode;
+
+	/*
+	 * After a monitor swap, the copies describe the previous monitor until
+	 * the next probe. Check them against the sink this stream is for, which
+	 * a hotplug may swap at any time since atomic_check doesn't hold
+	 * &drm_mode_config.mutex
+	 */
+	if (!amdgpu_dm_mode_copies_match(aconnector, sink)) {
+		drm_dbg_driver(aconnector->base.dev, "Preferred mode copy is from another sink\n");
+		return mode;
+	}
+
+	if (amdgpu_freesync_vid_mode &&
+	    amdgpu_dm_is_freesync_video_mode(drm_mode, aconnector, sink))
+		freesync_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector,
+									false, sink);
+	if (freesync_mode) {
+		drm_mode_copy(mode, freesync_mode);
+		mode->picture_aspect_ratio = drm_mode->picture_aspect_ratio;
+		return mode;
+	}
+
+	*preferred_refresh = drm_mode_vrefresh(preferred_mode);
+
+	/*
+	 * fill_stream_properties_from_drm_display_mode() reads the raw timing of
+	 * a mode equal to the FreeSync base, which the preferred mode often is.
+	 * Only a progressive mode has the same raw and CRTC timing
+	 */
+	if (decide_crtc_timing_for_drm_display_mode(mode, preferred_mode, scale) &&
+	    !drm_mode_match(drm_mode, preferred_mode,
+			    DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_CLOCK) &&
+	    !(preferred_mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN)) &&
+	    preferred_mode->vscan <= 1)
+		return preferred_mode;
+
+	return mode;
+}
+
+/*
  * A reference on the sink to build streams for: the connector's dc_sink, or a
  * fake sink without one
  */
@@ -1717,20 +1785,15 @@ create_stream_for_dc_sink(struct drm_connector *connector,
 	struct amdgpu_dm_connector *aconnector = NULL;
 	const struct drm_connector_state *con_state = &dm_state->base;
 	struct dc_stream_state *stream = NULL;
+	const struct drm_display_mode *signal_mode;
 	struct drm_display_mode mode;
-	struct drm_display_mode saved_mode;
-	struct drm_display_mode *freesync_mode = NULL;
-	bool recalculate_timing = false;
 	bool scale = dm_state->scaling != RMX_OFF;
 	int mode_refresh;
-	int preferred_refresh = 0;
+	int preferred_refresh;
 	enum color_transfer_func tf = TRANSFER_FUNC_UNKNOWN;
 #if defined(CONFIG_DRM_AMD_DC_FP)
 	struct dsc_dec_dpcd_caps dsc_caps = {0};
 #endif
-
-	drm_mode_init(&mode, drm_mode);
-	memset(&saved_mode, 0, sizeof(saved_mode));
 
 	if (connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK)
 		aconnector = to_amdgpu_dm_connector(connector);
@@ -1748,40 +1811,10 @@ create_stream_for_dc_sink(struct drm_connector *connector,
 	stream->timing.flags.LTE_340MCSC_SCRAMBLE =
 		connector->display_info.hdmi.scdc.scrambling.low_rates;
 
-	mode_refresh = drm_mode_vrefresh(&mode);
+	mode_refresh = drm_mode_vrefresh(drm_mode);
 
-	/*
-	 * After a monitor swap, the copies describe the previous monitor until
-	 * the next probe. Check them against the sink this stream is for, which
-	 * a hotplug may swap at any time since atomic_check doesn't hold
-	 * &drm_mode_config.mutex
-	 */
-	if (aconnector && preferred_mode && !amdgpu_dm_mode_copies_match(aconnector, sink)) {
-		drm_dbg_driver(dev, "Preferred mode copy is from another sink\n");
-		preferred_mode = NULL;
-	}
-
-	if (aconnector && preferred_mode) {
-		if (amdgpu_freesync_vid_mode &&
-		    amdgpu_dm_is_freesync_video_mode(&mode, aconnector, sink))
-			freesync_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector,
-										false, sink);
-		if (freesync_mode) {
-			recalculate_timing = true;
-			drm_mode_copy(&saved_mode, &mode);
-			saved_mode.picture_aspect_ratio = mode.picture_aspect_ratio;
-			drm_mode_copy(&mode, freesync_mode);
-			mode.picture_aspect_ratio = saved_mode.picture_aspect_ratio;
-		} else {
-			decide_crtc_timing_for_drm_display_mode(
-					&mode, preferred_mode, scale);
-
-			preferred_refresh = drm_mode_vrefresh(preferred_mode);
-		}
-	}
-
-	if (recalculate_timing)
-		drm_mode_set_crtcinfo(&saved_mode, 0);
+	signal_mode = stream_timing_mode(aconnector, drm_mode, preferred_mode, scale,
+					 sink, &mode, &preferred_refresh);
 
 	/*
 	 * If scaling is enabled and refresh rate didn't change
@@ -1789,11 +1822,11 @@ create_stream_for_dc_sink(struct drm_connector *connector,
 	 */
 	if (!scale || mode_refresh != preferred_refresh)
 		fill_stream_properties_from_drm_display_mode(
-			stream, &mode, connector, sink, con_state, NULL,
+			stream, signal_mode, connector, sink, con_state, NULL,
 			requested_bpc, requested_encoding, is_hdmi_ep);
 	else
 		fill_stream_properties_from_drm_display_mode(
-			stream, &mode, connector, sink, con_state, old_stream,
+			stream, signal_mode, connector, sink, con_state, old_stream,
 			requested_bpc, requested_encoding, is_hdmi_ep);
 
 	/* The rest isn't needed for writeback connectors */
