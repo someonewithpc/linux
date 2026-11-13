@@ -434,12 +434,16 @@ void acpi_processor_thermal_exit(struct acpi_processor *pr,
 extern const struct thermal_cooling_device_ops processor_cooling_ops;
 #ifdef CONFIG_CPU_FREQ
 void acpi_thermal_cpufreq_init(struct cpufreq_policy *policy);
+void acpi_thermal_cpufreq_update(struct cpufreq_policy *policy);
 void acpi_thermal_cpufreq_exit(struct cpufreq_policy *policy);
 #else
 static inline void acpi_thermal_cpufreq_init(struct cpufreq_policy *policy)
 {
 	return;
 }
+
+static inline void acpi_thermal_cpufreq_update(struct cpufreq_policy *policy) { }
+
 static inline void acpi_thermal_cpufreq_exit(struct cpufreq_policy *policy)
 {
 	return;
