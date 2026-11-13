@@ -1688,9 +1688,9 @@ EXPORT_IF_KUNIT(amdgpu_dm_update_stream_scaling_settings);
  * for a mode with the same totals, the stream takes the CRTC timing of the
  * preferred mode copy. Return the mode whose VIC, aspect ratio and sync
  * polarity the stream signals: the preferred mode copy if the stream drives it
- * in place of another timing, else @mode. Set @preferred_refresh to the
- * refresh rate of the preferred mode copy if the stream may take its timing,
- * else 0
+ * in place of another timing, else @mode. Set @preferred_refresh, if not
+ * NULL, to the refresh rate of the preferred mode copy if the stream may take
+ * its timing, else 0
  */
 static const struct drm_display_mode *
 stream_timing_mode(struct amdgpu_dm_connector *aconnector,
@@ -1702,7 +1702,8 @@ stream_timing_mode(struct amdgpu_dm_connector *aconnector,
 	const struct drm_display_mode *freesync_mode = NULL;
 
 	drm_mode_init(mode, drm_mode);
-	*preferred_refresh = 0;
+	if (preferred_refresh)
+		*preferred_refresh = 0;
 
 	if (!aconnector || !preferred_mode)
 		return mode;
@@ -1728,7 +1729,8 @@ stream_timing_mode(struct amdgpu_dm_connector *aconnector,
 		return mode;
 	}
 
-	*preferred_refresh = drm_mode_vrefresh(preferred_mode);
+	if (preferred_refresh)
+		*preferred_refresh = drm_mode_vrefresh(preferred_mode);
 
 	/*
 	 * fill_stream_properties_from_drm_display_mode() reads the raw timing of
@@ -2572,6 +2574,8 @@ __amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 	int requested_bpc = drm_state ? drm_state->max_requested_bpc : 8;
 	enum dc_status dc_result = DC_OK;
 	enum signal_type signal = SIGNAL_TYPE_NONE;
+	const struct drm_display_mode *timing_mode;
+	struct drm_display_mode timing_buf;
 	bool want_420, want_422, is_dp_or_hdmi;
 	u32 encoding_mask = 0;
 	u32 bpc_mask = 0;
@@ -2645,10 +2649,15 @@ __amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 	want_422 = (aconnector->force_yuv_pixel_format == PIXEL_ENCODING_YCBCR422) ||
 		(drm_state && drm_state->color_format == DRM_CONNECTOR_COLOR_FORMAT_YCBCR422);
 
-	if (drm_mode_is_420_only(info, drm_mode) &&
+	/* The sink lists YCbCr 4:2:0 per VIC, so check the one the stream signals */
+	timing_mode = stream_timing_mode(aconnector, drm_mode, preferred_mode,
+					 dm_state->scaling != RMX_OFF, sink,
+					 &timing_buf, NULL);
+
+	if (drm_mode_is_420_only(info, timing_mode) &&
 	    (want_420 || (drm_state && drm_state->color_format == DRM_CONNECTOR_COLOR_FORMAT_AUTO))) {
 		encoding_mask = BIT(PIXEL_ENCODING_YCBCR420);
-	} else if (drm_mode_is_420_also(info, drm_mode) && want_420) {
+	} else if (drm_mode_is_420_also(info, timing_mode) && want_420) {
 		encoding_mask = BIT(PIXEL_ENCODING_YCBCR420);
 	} else if ((info->color_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422)) &&
 		   want_422 && is_dp_or_hdmi) {
@@ -2670,7 +2679,7 @@ __amdgpu_dm_create_validate_stream_for_sink(struct drm_connector *connector,
 		if (info->color_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422))
 			encoding_mask |= BIT(PIXEL_ENCODING_YCBCR422);
 
-		if (drm_mode_is_420_also(info, drm_mode))
+		if (drm_mode_is_420_also(info, timing_mode))
 			encoding_mask |= BIT(PIXEL_ENCODING_YCBCR420);
 	}
 
