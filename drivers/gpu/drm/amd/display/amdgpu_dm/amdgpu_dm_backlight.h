@@ -38,6 +38,8 @@ struct attribute_group;
 #define AMDGPU_DM_DEFAULT_MIN_BACKLIGHT 12
 #define AMDGPU_DM_DEFAULT_MAX_BACKLIGHT 255
 #define AMDGPU_DM_MIN_SPREAD ((AMDGPU_DM_DEFAULT_MAX_BACKLIGHT - AMDGPU_DM_DEFAULT_MIN_BACKLIGHT) / 2)
+#define AMDGPU_DM_DEFAULT_AUX_MIN_NITS 1
+#define AMDGPU_DM_DEFAULT_AUX_MAX_NITS 512
 #define AUX_BL_DEFAULT_TRANSITION_TIME_MS 50
 
 void amdgpu_dm_update_backlight_caps(struct amdgpu_display_manager *dm,
