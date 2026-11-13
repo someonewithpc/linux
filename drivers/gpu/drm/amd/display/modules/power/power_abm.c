@@ -374,6 +374,22 @@ static unsigned int backlight_pwm_to_millipercent_legacy(
 	if (core_power == NULL)
 		return 0;
 
+	/* Inverse of the LUT bypass in backlight_millipercent_to_pwm_legacy() */
+	if (core_power->bl_prop[inst].use_linear_backlight_curve) {
+		const struct pwr_backlight_properties *bl_prop = &core_power->bl_prop[inst];
+
+		if (pwm <= bl_prop->min_backlight_pwm)
+			return 0;
+
+		if (pwm >= bl_prop->max_backlight_pwm)
+			return BACKLIGHT_MILLIPERCENT_MAX;
+
+		return (unsigned int)div_u64(
+				(unsigned long long)(pwm - bl_prop->min_backlight_pwm) *
+				BACKLIGHT_MILLIPERCENT_MAX + bl_prop->backlight_range / 2,
+				bl_prop->backlight_range);
+	}
+
 	if (!core_power->bl_prop[inst].backlight_caps_valid)
 		return 0;
 
@@ -529,7 +545,7 @@ static unsigned int backlight_millipercent_to_pwm_legacy(
 		return 0;
 
 	// Bypass the brightness mapping LUT
-	if (core_power->bl_prop->use_linear_backlight_curve) {
+	if (core_power->bl_prop[inst].use_linear_backlight_curve) {
 		pwm = core_power->bl_prop[inst].min_backlight_pwm +
 			(unsigned int) div_u64((unsigned long long) millipercent *
 			core_power->bl_prop[inst].backlight_range,
@@ -1147,6 +1163,71 @@ bool mod_power_set_backlight_percent(struct mod_power *mod_power,
 
 	return set_backlight(core_power, stream,
 			&backlight_level_params, panel_inst);
+}
+
+/* AMD AUX takes nits only when the panel's AUX backlight control is on,
+ * which DC turns on for OLED and for HDR. Otherwise the panel follows PWM.
+ */
+static bool backlight_takes_nits(const struct dc_link *link, bool is_hdr)
+{
+	switch (link->backlight_control_type) {
+	case BACKLIGHT_CONTROL_VESA_AUX:
+		return true;
+	case BACKLIGHT_CONTROL_AMD_AUX:
+		return link->dpcd_sink_ext_caps.bits.oled || is_hdr;
+	default:
+		return false;
+	}
+}
+
+/* Sets the brightness as a percentage, whatever the backlight control type.
+ * When the panel takes nits, the percentage maps linearly to
+ * [min_brightness_millinits, max_brightness_millinits] with
+ * aux_brightness_mask ORed in. Otherwise it maps to PWM through the
+ * backlight LUT.
+ */
+bool mod_power_set_brightness(struct mod_power *mod_power,
+		struct dc_stream_state *stream,
+		unsigned int backlight_millipercent,
+		unsigned int transition_time_millisec,
+		unsigned int aux_brightness_mask,
+		bool is_hdr)
+{
+	struct core_power *core_power = NULL;
+	const struct dc_link *link = NULL;
+	unsigned int backlight_millinit;
+	unsigned int panel_inst = 0;
+
+	if (mod_power == NULL || stream == NULL)
+		return false;
+
+	core_power = MOD_POWER_TO_CORE(mod_power);
+	link = dc_stream_get_link(stream);
+
+	if (!dc_get_edp_link_panel_inst(core_power->dc, link, &panel_inst))
+		return false;
+
+	if (backlight_millipercent > BACKLIGHT_MILLIPERCENT_MAX)
+		backlight_millipercent = BACKLIGHT_MILLIPERCENT_MAX;
+
+	core_power->bl_state[panel_inst].isHDR = is_hdr;
+
+	if (!backlight_takes_nits(link, is_hdr))
+		return mod_power_set_backlight_percent(mod_power, stream,
+				backlight_millipercent, transition_time_millisec, is_hdr);
+
+	backlight_millinit = backlight_millipercent_to_millinit_legacy(
+			core_power, backlight_millipercent, panel_inst) |
+			aux_brightness_mask;
+
+	if (!mod_power_set_backlight_nits(mod_power, stream, backlight_millinit,
+			transition_time_millisec, false, is_hdr))
+		return false;
+
+	/* mod_power_set_backlight_nits() caches the percent read back from nits */
+	core_power->bl_state[panel_inst].backlight_millipercent = backlight_millipercent;
+
+	return true;
 }
 
 void mod_power_update_backlight(struct mod_power *mod_power,
