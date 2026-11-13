@@ -356,6 +356,8 @@ static bool drm_client_target_cloned(struct drm_device *dev,
 		return true;
 	}
 
+	modes_destroy(dev, modes, connector_count);
+
 	/* try and find a 1024x768 mode on each connector */
 	can_clone = true;
 	dmt_mode = drm_mode_find_dmt(dev, 1024, 768, 60, false);
