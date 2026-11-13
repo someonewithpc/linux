@@ -8291,6 +8291,174 @@ static void dm_test_create_validate_stream_stale_copy(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 1920);
 }
 
+/* Load CEA @vic into @mode with the CRTC timing atomic modes carry */
+static void dm_test_cvs_set_cea_mode(struct kunit *test, struct drm_device *drm,
+				     struct drm_display_mode *mode, u8 vic)
+{
+	struct drm_display_mode *cea = drm_display_mode_from_cea_vic(drm, vic);
+
+	KUNIT_ASSERT_NOT_NULL(test, cea);
+	drm_mode_copy(mode, cea);
+	drm_mode_destroy(drm, cea);
+	drm_mode_set_crtcinfo(mode, CRTC_INTERLACE_HALVE_V);
+}
+
+/*
+ * An HDMI 2.0 sink with @scaling, a preferred mode copy of CEA @pref_vic and
+ * a request for CEA @mode_vic
+ */
+static struct dm_test_cvs_dc *
+dm_test_cvs_hdmi_copy_alloc(struct kunit *test, enum amdgpu_rmx_type scaling,
+			    u8 pref_vic, u8 mode_vic)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
+	struct drm_display_mode *pref = &c->aconnector->preferred_mode;
+
+	c->link->connector_signal = SIGNAL_TYPE_HDMI_TYPE_A;
+	c->aconnector->base.display_info.hdmi.scdc.supported = true;
+	c->dm_state->scaling = scaling;
+	dm_test_attach_copies_sink(test, c->aconnector, c->link);
+	dm_test_cvs_set_cea_mode(test, c->drm, pref, pref_vic);
+	pref->type = DRM_MODE_TYPE_PREFERRED;
+	dm_test_cvs_set_cea_mode(test, c->drm, c->mode, mode_vic);
+
+	return c;
+}
+
+static u8 dm_test_cvs_first_vic;
+static bool dm_test_cvs_first_hsync_positive;
+
+static bool dm_test_cvs_record_first_vic(struct timing_generator *tg,
+					 const struct dc_crtc_timing *timing)
+{
+	if (!dm_test_cvs_first_h_addressable) {
+		dm_test_cvs_first_h_addressable = timing->h_addressable;
+		dm_test_cvs_first_vic = timing->vic;
+		dm_test_cvs_first_hsync_positive = timing->flags.HSYNC_POSITIVE_POLARITY;
+	}
+
+	return false;
+}
+
+/* Return the VIC of the first stream atomic_check tries for @c */
+static u8 dm_test_cvs_signalled_vic(struct kunit *test, struct dm_test_cvs_dc *c)
+{
+	struct dc_stream_state *stream;
+
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_vic;
+	dm_test_cvs_first_h_addressable = 0;
+	dm_test_cvs_first_vic = 0;
+	dm_test_cvs_first_hsync_positive = true;
+
+	stream = dm_test_validate_locked(&c->aconnector->base, c->mode,
+					 c->dm_state, NULL);
+	KUNIT_EXPECT_NULL(test, stream);
+	if (stream)
+		dc_stream_release(stream);
+
+	return dm_test_cvs_first_vic;
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_vic - Signal the VIC of the scaled timing
+ * @test: The KUnit test context
+ *
+ * With scaling on, a 1080p request (VIC 16) drives the 2160p60 timing of the
+ * preferred mode copy (VIC 97), so the stream signals VIC 97
+ */
+static void dm_test_create_validate_stream_scaled_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 97, 16);
+
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_signalled_vic(test, c), 97);
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 3840);
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_clock_vic - Signal the VIC of a faster scaled timing
+ * @test: The KUnit test context
+ *
+ * With scaling on, a 2160p30 request (VIC 95) has the totals of the 2160p60
+ * preferred mode copy (VIC 97) but half its clock. The stream drives 2160p60,
+ * so it signals VIC 97
+ */
+static void dm_test_create_validate_stream_scaled_clock_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 97, 95);
+
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_signalled_vic(test, c), 97);
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_interlaced_vic - Keep the requested VIC for 1080i
+ * @test: The KUnit test context
+ *
+ * With scaling on, a 720p request (VIC 4) drives the timing of an interlaced
+ * 1080i preferred mode copy (VIC 5). Its raw timing isn't its CRTC timing,
+ * so the stream keeps signalling VIC 4, as before
+ */
+static void dm_test_create_validate_stream_scaled_interlaced_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 5, 4);
+
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_signalled_vic(test, c), 4);
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 1920);
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_equal_vic - Keep the VIC of an equal timing
+ * @test: The KUnit test context
+ *
+ * With scaling on, a 2160p60 64:27 request (VIC 107) takes the equal timing of
+ * the 16:9 preferred mode copy (VIC 97), and still signals VIC 107
+ */
+static void dm_test_create_validate_stream_scaled_equal_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 97, 107);
+
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_signalled_vic(test, c), 107);
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_polarity - Keep the polarity of an equal timing
+ * @test: The KUnit test context
+ *
+ * With scaling on, a request with the timing and clock of the 2160p60
+ * preferred mode copy but negative sync keeps its own sync polarity
+ */
+static void dm_test_create_validate_stream_scaled_polarity(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 97, 97);
+
+	c->mode->flags &= ~(DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC);
+	c->mode->flags |= DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+	dm_test_cvs_signalled_vic(test, c);
+
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 3840);
+	KUNIT_EXPECT_FALSE(test, dm_test_cvs_first_hsync_positive);
+}
+
+/**
+ * dm_test_create_validate_stream_inserted_vic - Signal the native VIC of an inserted mode
+ * @test: The KUnit test context
+ *
+ * Without scaling, a 1920x1080 mode built on the totals of the 2160p60
+ * preferred mode copy (VIC 97) drives the native timing, so the stream
+ * signals VIC 97
+ */
+static void dm_test_create_validate_stream_inserted_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_OFF, 97, 97);
+
+	c->mode->hdisplay = 1920;
+	c->mode->vdisplay = 1080;
+	c->mode->picture_aspect_ratio = HDMI_PICTURE_ASPECT_NONE;
+	drm_mode_set_crtcinfo(c->mode, CRTC_INTERLACE_HALVE_V);
+
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_signalled_vic(test, c), 97);
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 3840);
+}
+
 /**
  * dm_test_mode_valid_ignores_preferred_copy - Test mode_valid uses the mode's own timing
  * @test: The KUnit test context
@@ -11561,6 +11729,12 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_validate_stream_hdmi_rgb_first),
 	KUNIT_CASE(dm_test_create_validate_stream_scaled_copy),
 	KUNIT_CASE(dm_test_create_validate_stream_stale_copy),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_vic),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_clock_vic),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_interlaced_vic),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_equal_vic),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_polarity),
+	KUNIT_CASE(dm_test_create_validate_stream_inserted_vic),
 	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_copy),
 	/* amdgpu_dm_update_connector_after_detect */
 	KUNIT_CASE(dm_test_update_after_detect_mst_noop),
