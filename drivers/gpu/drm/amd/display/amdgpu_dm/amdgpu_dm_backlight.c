@@ -602,10 +602,30 @@ static int panel_power_savings_apply(struct drm_connector *connector,
 	struct drm_device *dev = connector->dev;
 	struct drm_modeset_acquire_ctx ctx;
 	struct drm_atomic_commit *state;
+	bool forbidden, unchanged;
 	int ret, idx;
+
+	level = level ?: ABM_LEVEL_IMMEDIATE_DISABLE;
 
 	if (!drm_dev_enter(dev, &idx))
 		return -ENODEV;
+
+	/*
+	 * Don't wake the GPU for a write that changes nothing. The duplicated
+	 * state below is checked again. This check only spares the runtime resume
+	 */
+	ret = drm_modeset_lock_single_interruptible(&dev->mode_config.connection_mutex);
+	if (ret)
+		goto dev_exit;
+	dm_state = to_dm_connector_state(connector->state);
+	forbidden = dm_state->abm_sysfs_forbidden;
+	unchanged = dm_state->abm_level == level;
+	drm_modeset_unlock(&dev->mode_config.connection_mutex);
+
+	if (forbidden || unchanged) {
+		ret = forbidden ? -EBUSY : 0;
+		goto dev_exit;
+	}
 
 	ret = pm_runtime_resume_and_get(dev->dev);
 	if (ret < 0)
@@ -635,7 +655,12 @@ retry:
 		goto out;
 	}
 
-	dm_state->abm_level = level ?: ABM_LEVEL_IMMEDIATE_DISABLE;
+	if (dm_state->abm_level == level) {
+		ret = 0;
+		goto out;
+	}
+
+	dm_state->abm_level = level;
 
 	ret = drm_atomic_commit(state);
 out:
@@ -675,6 +700,9 @@ ssize_t panel_power_savings_store(struct device *device,
 		return -EINVAL;
 
 	ret = panel_power_savings_apply(connector, val);
+	/* The modeset locks return -EINTR, which write(2) would not restart */
+	if (ret == -EINTR)
+		return -ERESTARTSYS;
 	if (ret)
 		return ret;
 
