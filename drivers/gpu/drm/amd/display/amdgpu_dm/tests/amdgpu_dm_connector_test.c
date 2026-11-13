@@ -8459,6 +8459,119 @@ static void dm_test_create_validate_stream_inserted_vic(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 3840);
 }
 
+/* Return the first encoding atomic_check tries for @c when only @y420_only_vic is 4:2:0 only */
+static enum dc_pixel_encoding
+dm_test_cvs_first_encoding_for(struct kunit *test, struct dm_test_cvs_dc *c,
+			       u8 y420_only_vic)
+{
+	struct dc_stream_state *stream;
+
+	set_bit(y420_only_vic, c->aconnector->base.display_info.hdmi.y420_vdb_modes);
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_encoding;
+	dm_test_cvs_first_encoding = PIXEL_ENCODING_UNDEFINED;
+
+	stream = dm_test_validate_locked(&c->aconnector->base, c->mode,
+					 c->dm_state, NULL);
+	KUNIT_EXPECT_NULL(test, stream);
+	if (stream)
+		dc_stream_release(stream);
+
+	return dm_test_cvs_first_encoding;
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_420_only_timing - Scale to a 4:2:0 only timing
+ * @test: The KUnit test context
+ *
+ * With scaling on, a 1080p request drives and signals the 2160p60 timing of
+ * the preferred mode copy. That timing is YCbCr 4:2:0 only, so atomic_check
+ * must try only YCbCr 4:2:0, even though 1080p itself is not 4:2:0 only
+ */
+static void dm_test_create_validate_stream_scaled_420_only_timing(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 97, 16);
+
+	KUNIT_EXPECT_EQ(test, (int)dm_test_cvs_first_encoding_for(test, c, 97),
+			(int)PIXEL_ENCODING_YCBCR420);
+}
+
+/**
+ * dm_test_create_validate_stream_scaled_420_only_mode - Scale a 4:2:0 only mode
+ * @test: The KUnit test context
+ *
+ * With scaling on, a 2160p60 request that is YCbCr 4:2:0 only drives the
+ * 1080p timing of the preferred mode copy, which the sink takes in RGB. RGB
+ * comes first, as for any timing that isn't 4:2:0 only
+ */
+static void dm_test_create_validate_stream_scaled_420_only_mode(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_FULL, 16, 97);
+
+	KUNIT_EXPECT_EQ(test, (int)dm_test_cvs_first_encoding_for(test, c, 97),
+			(int)PIXEL_ENCODING_RGB);
+}
+
+/**
+ * dm_test_create_validate_stream_unscaled_420_only_vic - Check the requested VIC without scaling
+ * @test: The KUnit test context
+ *
+ * Without scaling, a 2160p60 64:27 request (VIC 107) takes its CRTC timing
+ * from the equal 16:9 preferred mode copy (VIC 97), but still signals VIC
+ * 107. Only VIC 107 is YCbCr 4:2:0 only, so atomic_check must try only
+ * YCbCr 4:2:0
+ */
+static void dm_test_create_validate_stream_unscaled_420_only_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_OFF, 97, 107);
+
+	KUNIT_EXPECT_EQ(test, (int)dm_test_cvs_first_encoding_for(test, c, 107),
+			(int)PIXEL_ENCODING_YCBCR420);
+}
+
+/**
+ * dm_test_create_validate_stream_inserted_420_only - Check the native VIC of an inserted mode
+ * @test: The KUnit test context
+ *
+ * Without scaling, a 1920x1080 mode built on the totals of the 2160p60
+ * preferred mode copy (VIC 97) drives and signals the native timing, which is
+ * YCbCr 4:2:0 only, so atomic_check must try only YCbCr 4:2:0
+ */
+static void dm_test_create_validate_stream_inserted_420_only(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_OFF, 97, 97);
+
+	c->mode->hdisplay = 1920;
+	c->mode->vdisplay = 1080;
+	c->mode->picture_aspect_ratio = HDMI_PICTURE_ASPECT_NONE;
+	drm_mode_set_crtcinfo(c->mode, CRTC_INTERLACE_HALVE_V);
+
+	KUNIT_EXPECT_EQ(test, (int)dm_test_cvs_first_encoding_for(test, c, 97),
+			(int)PIXEL_ENCODING_YCBCR420);
+}
+
+/**
+ * dm_test_create_validate_stream_freesync_420_only_vic - Check a FreeSync variant's VIC
+ * @test: The KUnit test context
+ *
+ * A 2160p60 64:27 request (VIC 107) with the timing of the 16:9 FreeSync
+ * video base (VIC 97) drives the base timing but keeps its aspect ratio, so
+ * the stream signals VIC 107. Only VIC 107 is YCbCr 4:2:0 only, so
+ * atomic_check must try only YCbCr 4:2:0
+ */
+static void dm_test_create_validate_stream_freesync_420_only_vic(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_hdmi_copy_alloc(test, RMX_OFF, 97, 107);
+	uint saved_vid_mode = amdgpu_freesync_vid_mode;
+	enum dc_pixel_encoding enc;
+
+	drm_mode_copy(&c->aconnector->freesync_vid_base, &c->aconnector->preferred_mode);
+	amdgpu_freesync_vid_mode = 1;
+	enc = dm_test_cvs_first_encoding_for(test, c, 107);
+	amdgpu_freesync_vid_mode = saved_vid_mode;
+
+	KUNIT_EXPECT_EQ(test, (int)enc, (int)PIXEL_ENCODING_YCBCR420);
+}
+
 /**
  * dm_test_mode_valid_ignores_preferred_copy - Test mode_valid uses the mode's own timing
  * @test: The KUnit test context
@@ -11735,6 +11848,11 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_validate_stream_scaled_equal_vic),
 	KUNIT_CASE(dm_test_create_validate_stream_scaled_polarity),
 	KUNIT_CASE(dm_test_create_validate_stream_inserted_vic),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_420_only_timing),
+	KUNIT_CASE(dm_test_create_validate_stream_scaled_420_only_mode),
+	KUNIT_CASE(dm_test_create_validate_stream_unscaled_420_only_vic),
+	KUNIT_CASE(dm_test_create_validate_stream_inserted_420_only),
+	KUNIT_CASE(dm_test_create_validate_stream_freesync_420_only_vic),
 	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_copy),
 	/* amdgpu_dm_update_connector_after_detect */
 	KUNIT_CASE(dm_test_update_after_detect_mst_noop),
