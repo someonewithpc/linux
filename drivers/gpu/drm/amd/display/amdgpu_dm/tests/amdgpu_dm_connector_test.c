@@ -5,6 +5,7 @@
  * Copyright 2026 Advanced Micro Devices, Inc.
  */
 
+#include <kunit/test-bug.h>
 #include <kunit/test.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_state_helper.h>
@@ -5164,6 +5165,40 @@ static void dm_test_poll_disconnect_releases_sink(struct kunit *test)
 		(int)amdgpu_dm_connector_poll(ctx->aconnector, false),
 		(int)connector_status_disconnected);
 	KUNIT_EXPECT_NULL(test, ctx->link->local_sink);
+}
+
+static bool dm_test_poll_detect_type_unexpected(struct dc_link *link,
+						enum dc_connection_type *type)
+{
+	KUNIT_FAIL(kunit_get_current_test(), "poll detected with hpd_lock busy");
+	*type = dc_connection_none;
+	return false;
+}
+
+/**
+ * dm_test_poll_hpd_lock_busy_keeps_status - Test polling while hpd_lock is held
+ * @test: The KUnit test context
+ *
+ * The HPD handler holds hpd_lock while it waits for mode_config.mutex, which
+ * the poll worker already holds. The poll must not wait for hpd_lock: it skips
+ * detection and returns the current status, so the next poll retries
+ */
+static void dm_test_poll_hpd_lock_busy_keeps_status(struct kunit *test)
+{
+	struct dm_test_poll_ctx *ctx = dm_test_poll_ctx_alloc(test);
+	enum drm_connector_status status;
+
+	ctx->link_srv->detect_connection_type = dm_test_poll_detect_type_unexpected;
+	ctx->link->local_sink = NULL;
+	ctx->aconnector->base.status = connector_status_connected;
+
+	mutex_lock(&ctx->aconnector->hpd_lock);
+	status = amdgpu_dm_connector_poll(ctx->aconnector, false);
+	mutex_unlock(&ctx->aconnector->hpd_lock);
+
+	KUNIT_EXPECT_EQ(test, (int)status, (int)connector_status_connected);
+	KUNIT_EXPECT_EQ(test, (int)ctx->aconnector->base.status,
+			(int)connector_status_connected);
 }
 
 /* Tests for amdgpu_dm_connector_late_register() and _unregister() */
@@ -10578,6 +10613,7 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_poll_connected_cached_sink),
 	KUNIT_CASE(dm_test_poll_connected_new_sink),
 	KUNIT_CASE(dm_test_poll_disconnect_releases_sink),
+	KUNIT_CASE(dm_test_poll_hpd_lock_busy_keeps_status),
 	/* amdgpu_dm_connector_late_register */
 	KUNIT_CASE(dm_test_late_register_non_dp_succeeds),
 	/* amdgpu_dm_connector_unregister */
