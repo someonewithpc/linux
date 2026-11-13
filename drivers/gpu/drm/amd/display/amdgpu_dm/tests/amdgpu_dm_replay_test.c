@@ -505,17 +505,11 @@ static void dm_test_replay_set_event_missing_power_module(struct kunit *test)
 							    replay_event_vsync, false));
 }
 
-/**
- * dm_test_replay_set_event_already_set - Verify no-op when event already active
- * @test: KUnit test context
- *
- * When the requested event is already in the desired state, the function should
- * return true without calling mod_power_set_replay_event().
- */
-static void dm_test_replay_set_event_already_set(struct kunit *test)
+static struct amdgpu_display_manager *alloc_replay_dm(struct kunit *test,
+						      struct dc_stream_state *stream,
+						      unsigned int replay_events)
 {
 	struct amdgpu_display_manager *dm;
-	struct replay_test_ctx *ctx = alloc_replay_ctx(test);
 	struct core_power *core_power;
 	struct power_entity *map;
 
@@ -528,12 +522,26 @@ static void dm_test_replay_set_event_already_set(struct kunit *test)
 	map = kunit_kzalloc(test, sizeof(*map), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, map);
 
-	/* Wire the power module so mod_power_get_replay_event() succeeds */
-	map->stream = ctx->stream;
-	map->replay_events = replay_event_vsync;
+	map->stream = stream;
+	map->replay_events = replay_events;
 	core_power->map = map;
 	core_power->num_entities = 1;
 	dm->power_module = &core_power->mod_public;
+
+	return dm;
+}
+
+/**
+ * dm_test_replay_set_event_already_set - Verify no-op when event already active
+ * @test: KUnit test context
+ *
+ * When the requested event is already in the desired state, the function should
+ * return true without calling mod_power_set_replay_event().
+ */
+static void dm_test_replay_set_event_already_set(struct kunit *test)
+{
+	struct replay_test_ctx *ctx = alloc_replay_ctx(test);
+	struct amdgpu_display_manager *dm = alloc_replay_dm(test, ctx->stream, replay_event_vsync);
 
 	ctx->link->replay_settings.replay_feature_enabled = true;
 
@@ -551,32 +559,66 @@ static void dm_test_replay_set_event_already_set(struct kunit *test)
  */
 static void dm_test_replay_set_event_already_clear(struct kunit *test)
 {
-	struct amdgpu_display_manager *dm;
 	struct replay_test_ctx *ctx = alloc_replay_ctx(test);
-	struct core_power *core_power;
-	struct power_entity *map;
-
-	dm = kunit_kzalloc(test, sizeof(*dm), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, dm);
-
-	core_power = kunit_kzalloc(test, sizeof(*core_power), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, core_power);
-
-	map = kunit_kzalloc(test, sizeof(*map), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, map);
-
-	/* Wire the power module — replay_events has NO vsync bit */
-	map->stream = ctx->stream;
-	map->replay_events = 0;
-	core_power->map = map;
-	core_power->num_entities = 1;
-	dm->power_module = &core_power->mod_public;
+	struct amdgpu_display_manager *dm = alloc_replay_dm(test, ctx->stream, 0);
 
 	ctx->link->replay_settings.replay_feature_enabled = true;
 
 	/* Clearing an event that's already clear — should return true */
 	KUNIT_EXPECT_TRUE(test, amdgpu_dm_replay_set_event(dm, ctx->stream, false,
 							   replay_event_vsync, false));
+}
+
+/* Tests for amdgpu_dm_replay_event_is_set() */
+
+/**
+ * dm_test_replay_event_is_set_feature_disabled - Disabled Replay reports no event
+ * @test: KUnit test context
+ */
+static void dm_test_replay_event_is_set_feature_disabled(struct kunit *test)
+{
+	struct replay_test_ctx *ctx = alloc_replay_ctx(test);
+	struct amdgpu_display_manager *dm;
+
+	dm = alloc_replay_dm(test, ctx->stream, replay_event_vsync);
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_replay_event_is_set(dm, ctx->stream,
+							       replay_event_vsync));
+}
+
+/**
+ * dm_test_replay_event_is_set_missing_power_module - Missing power module reports no event
+ * @test: KUnit test context
+ */
+static void dm_test_replay_event_is_set_missing_power_module(struct kunit *test)
+{
+	struct replay_test_ctx *ctx = alloc_replay_ctx(test);
+	struct amdgpu_display_manager *dm;
+
+	dm = kunit_kzalloc(test, sizeof(*dm), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dm);
+	ctx->link->replay_settings.replay_feature_enabled = true;
+
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_replay_event_is_set(dm, ctx->stream,
+							       replay_event_vsync));
+}
+
+/**
+ * dm_test_replay_event_is_set_reports_events - Only events in mod_power are set
+ * @test: KUnit test context
+ */
+static void dm_test_replay_event_is_set_reports_events(struct kunit *test)
+{
+	struct replay_test_ctx *ctx = alloc_replay_ctx(test);
+	struct amdgpu_display_manager *dm;
+
+	dm = alloc_replay_dm(test, ctx->stream, replay_event_vsync);
+	ctx->link->replay_settings.replay_feature_enabled = true;
+
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_replay_event_is_set(dm, ctx->stream,
+							      replay_event_vsync));
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_replay_event_is_set(dm, ctx->stream,
+							       replay_event_hw_programming));
 }
 
 static struct kunit_case dm_replay_test_cases[] = {
@@ -611,6 +653,10 @@ static struct kunit_case dm_replay_test_cases[] = {
 	KUNIT_CASE(dm_test_replay_set_event_missing_power_module),
 	KUNIT_CASE(dm_test_replay_set_event_already_set),
 	KUNIT_CASE(dm_test_replay_set_event_already_clear),
+	/* amdgpu_dm_replay_event_is_set */
+	KUNIT_CASE(dm_test_replay_event_is_set_feature_disabled),
+	KUNIT_CASE(dm_test_replay_event_is_set_missing_power_module),
+	KUNIT_CASE(dm_test_replay_event_is_set_reports_events),
 	{}
 };
 
