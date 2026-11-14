@@ -2534,6 +2534,95 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
 }
 
+/**
+ * dm_test_highest_refresh_skips_modes - Test atomic_check callers never walk base.modes
+ * @test: The KUnit test context
+ *
+ * base.modes needs &drm_mode_config.mutex, which atomic_check doesn't hold.
+ * Without a copy the lookup returns NULL, even though base.modes has a mode
+ */
+static void dm_test_highest_refresh_skips_modes(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct dc_sink *sink;
+	struct drm_display_mode *mode;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.modes);
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+
+	mode->type = DRM_MODE_TYPE_PREFERRED;
+	mode->clock = 148500;
+	mode->hdisplay = 1920;
+	mode->vdisplay = 1080;
+	mode->htotal = 2200;
+	mode->vtotal = 1125;
+	list_add_tail(&mode->head, &aconnector->base.modes);
+
+	sink = dm_test_copies_sink(test, aconnector);
+	KUNIT_EXPECT_NULL(test, dm_test_highest_locked(test, aconnector, false, sink));
+	KUNIT_EXPECT_EQ(test, aconnector->freesync_vid_base.clock, 0);
+}
+
+/**
+ * dm_test_highest_refresh_other_sink - Test a copy from another sink is ignored
+ * @test: The KUnit test context
+ *
+ * After a monitor swap the copy describes the previous monitor until the next
+ * probe, so a sink with another EDID, or with none, gets no freesync base. A
+ * new sink with the same EDID, as after a replug, keeps it
+ */
+static void dm_test_highest_refresh_other_sink(struct kunit *test)
+{
+	struct amdgpu_dm_connector *aconnector;
+	struct drm_display_mode *mode;
+	struct dc_sink *probed, *other, *replugged, *no_edid;
+
+	aconnector = kunit_kzalloc(test, sizeof(*aconnector), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aconnector);
+	mode = kunit_kzalloc(test, sizeof(*mode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, mode);
+	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, other);
+	replugged = kunit_kzalloc(test, sizeof(*replugged), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, replugged);
+	no_edid = kunit_kzalloc(test, sizeof(*no_edid), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, no_edid);
+
+	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
+	INIT_LIST_HEAD(&aconnector->base.probed_modes);
+	aconnector->freesync_vid_base.clock = 148500;
+	aconnector->freesync_vid_base.hdisplay = 1920;
+	aconnector->freesync_vid_base.vdisplay = 1080;
+	aconnector->freesync_vid_base.htotal = 2200;
+	aconnector->freesync_vid_base.vtotal = 1125;
+	drm_mode_copy(mode, &aconnector->freesync_vid_base);
+
+	probed = dm_test_copies_sink(test, aconnector);
+	replugged->dc_edid = probed->dc_edid;
+	other->dc_edid = probed->dc_edid;
+	other->dc_edid.raw_edid[12]++;
+
+	KUNIT_EXPECT_PTR_EQ(test,
+			    dm_test_highest_locked(test, aconnector, false, probed),
+			    &aconnector->freesync_vid_base);
+	KUNIT_EXPECT_TRUE(test, dm_test_is_fs_video_locked(test, mode, aconnector, probed));
+	KUNIT_EXPECT_PTR_EQ(test,
+			    dm_test_highest_locked(test, aconnector, false, replugged),
+			    &aconnector->freesync_vid_base);
+
+	KUNIT_EXPECT_NULL(test, dm_test_highest_locked(test, aconnector, false, other));
+	KUNIT_EXPECT_FALSE(test, dm_test_is_fs_video_locked(test, mode, aconnector, other));
+	KUNIT_EXPECT_NULL(test,
+			  dm_test_highest_locked(test, aconnector, false, no_edid));
+	KUNIT_EXPECT_NULL(test, dm_test_highest_locked(test, aconnector, false, NULL));
+}
+
 /* Tests for amdgpu_dm_connector_update_mode_copies() */
 
 static struct drm_display_mode *
@@ -8234,6 +8323,34 @@ static void dm_test_create_validate_stream_scaled_copy(struct kunit *test)
 }
 
 /**
+ * dm_test_create_validate_stream_stale_copy - Test atomic_check ignores a stale copy
+ * @test: The KUnit test context
+ *
+ * After a monitor swap the connector has a sink with another EDID, and the
+ * copy describes the previous monitor. Its timing must not be applied, even
+ * with scaling on
+ */
+static void dm_test_create_validate_stream_stale_copy(struct kunit *test)
+{
+	struct dm_test_cvs_dc *c = dm_test_cvs_dc_alloc(test);
+
+	/* drm_mode_convert_umode() fills in the CRTC timing of atomic modes */
+	drm_mode_set_crtcinfo(c->mode, CRTC_INTERLACE_HALVE_V);
+	c->dm_state->scaling = RMX_FULL;
+	dm_test_cvs_set_preferred_copy(test, c);
+	c->aconnector->dc_sink->dc_edid.raw_edid[12]++;
+	c->tgfuncs->validate_timing = dm_test_cvs_record_first_h_addressable;
+	dm_test_cvs_first_h_addressable = 0;
+
+	KUNIT_EXPECT_NULL(test,
+			  dm_test_validate_locked(&c->aconnector->base,
+						  c->mode,
+						  c->dm_state,
+						  NULL));
+	KUNIT_EXPECT_EQ(test, dm_test_cvs_first_h_addressable, 1920);
+}
+
+/**
  * dm_test_mode_valid_ignores_preferred_copy - Test mode_valid uses the mode's own timing
  * @test: The KUnit test context
  *
@@ -11271,6 +11388,8 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_highest_refresh_cached_base),
 	KUNIT_CASE(dm_test_highest_refresh_preferred_mode),
 	KUNIT_CASE(dm_test_highest_refresh_probed_skips_copy),
+	KUNIT_CASE(dm_test_highest_refresh_skips_modes),
+	KUNIT_CASE(dm_test_highest_refresh_other_sink),
 	/* amdgpu_dm_connector_update_mode_copies */
 	KUNIT_CASE(dm_test_update_mode_copies_highest_refresh),
 	KUNIT_CASE(dm_test_update_mode_copies_no_preferred),
@@ -11503,6 +11622,7 @@ static struct kunit_case amdgpu_dm_connector_tests[] = {
 	KUNIT_CASE(dm_test_create_validate_stream_prune_context),
 	KUNIT_CASE(dm_test_create_validate_stream_hdmi_rgb_first),
 	KUNIT_CASE(dm_test_create_validate_stream_scaled_copy),
+	KUNIT_CASE(dm_test_create_validate_stream_stale_copy),
 	KUNIT_CASE(dm_test_mode_valid_ignores_preferred_copy),
 	/* amdgpu_dm_update_connector_after_detect */
 	KUNIT_CASE(dm_test_update_after_detect_mst_noop),
