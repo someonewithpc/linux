@@ -1286,6 +1286,9 @@ void amdgpu_dm_update_hdcp(struct drm_atomic_commit *state);
 int amdgpu_dm_atomic_setup_commit(struct drm_atomic_commit *state);
 int do_aquire_global_lock(struct drm_device *dev,
 			  struct drm_atomic_commit *state);
+void dm_set_freesync_video_config(struct amdgpu_dm_connector *aconnector,
+				  struct dm_crtc_state *dm_new_crtc_state,
+				  const struct dc_stream_state *new_stream);
 int dm_update_crtc_state(struct amdgpu_display_manager *dm,
 			 struct drm_atomic_commit *state,
 			 struct drm_crtc *crtc,
