@@ -137,7 +137,7 @@ amdgpu_dm_get_output_color_space(const struct dc_crtc_timing *dc_crtc_timing,
 
 struct drm_display_mode *
 amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
-			      bool use_probed_modes, const struct dc_sink *sink);
+			      bool in_probe, const struct dc_sink *sink);
 
 struct amdgpu_i2c_adapter *
 amdgpu_dm_create_i2c(struct ddc_service *ddc_service, bool oem);
@@ -209,8 +209,7 @@ create_stream_for_sink(struct drm_connector *connector,
 		       enum dc_pixel_encoding requested_encoding,
 		       bool is_hdmi_ep);
 const struct drm_display_mode *
-amdgpu_dm_connector_preferred_mode(struct drm_connector *connector,
-				   struct drm_display_mode *native_buf);
+amdgpu_dm_connector_preferred_mode(struct drm_connector *connector);
 enum drm_connector_status
 amdgpu_dm_connector_poll(struct amdgpu_dm_connector *aconnector, bool force);
 enum drm_connector_status
