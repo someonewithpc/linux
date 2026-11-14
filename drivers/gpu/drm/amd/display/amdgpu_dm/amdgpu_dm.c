@@ -5568,6 +5568,33 @@ static int do_aquire_global_lock(struct drm_device *dev,
 	return ret < 0 ? ret : 0;
 }
 
+/*
+ * Use the fixed refresh config for a FreeSync video mode other than its base.
+ * create_stream_for_sink() picked @new_stream's timing for new_stream->sink,
+ * so decide for that sink too, even if a hotplug swapped dc_sink after the
+ * old stream was built. dc_stream_state marks sink deprecated, but
+ * dm_update_crtc_state() keeps no other record of the sink the stream was
+ * built for
+ */
+STATIC_IFN_KUNIT void
+dm_set_freesync_video_config(struct amdgpu_dm_connector *aconnector,
+			     struct dm_crtc_state *dm_new_crtc_state,
+			     const struct dc_stream_state *new_stream)
+{
+	const struct drm_display_mode *mode = &dm_new_crtc_state->base.mode;
+	struct drm_display_mode *high_mode;
+
+	if (!amdgpu_freesync_vid_mode ||
+	    !amdgpu_dm_is_freesync_video_mode(mode, aconnector, new_stream->sink))
+		return;
+
+	high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false,
+							    new_stream->sink);
+	if (high_mode && !drm_mode_equal(mode, high_mode))
+		amdgpu_dm_set_freesync_fixed_config(dm_new_crtc_state);
+}
+EXPORT_IF_KUNIT(dm_set_freesync_video_config);
+
 static int dm_update_crtc_state(struct amdgpu_display_manager *dm,
 			 struct drm_atomic_commit *state,
 			 struct drm_crtc *crtc,
@@ -5716,15 +5743,6 @@ static int dm_update_crtc_state(struct amdgpu_display_manager *dm,
 			amdgpu_dm_set_freesync_fixed_config(dm_new_crtc_state);
 
 			goto skip_modeset;
-		} else if (amdgpu_freesync_vid_mode && aconnector &&
-			   amdgpu_dm_is_freesync_video_mode(&new_crtc_state->mode,
-						  aconnector, aconnector->dc_sink)) {
-			struct drm_display_mode *high_mode;
-
-			high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false,
-									    aconnector->dc_sink);
-			if (!drm_mode_equal(&new_crtc_state->mode, high_mode))
-				amdgpu_dm_set_freesync_fixed_config(dm_new_crtc_state);
 		}
 
 		ret = dm_atomic_get_state(state, &dm_state);
@@ -5787,6 +5805,9 @@ static int dm_update_crtc_state(struct amdgpu_display_manager *dm,
 			}
 
 			*lock_and_validation_needed = true;
+
+			dm_set_freesync_video_config(aconnector, dm_new_crtc_state,
+						     new_stream);
 		}
 	}
 

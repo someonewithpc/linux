@@ -1218,6 +1218,9 @@ bool is_content_protection_different(struct drm_crtc_state *new_crtc_state,
 				     struct drm_connector_state *old_conn_state,
 				     const struct drm_connector *connector,
 				     struct hdcp_workqueue *hdcp_w);
+void dm_set_freesync_video_config(struct amdgpu_dm_connector *aconnector,
+				  struct dm_crtc_state *dm_new_crtc_state,
+				  const struct dc_stream_state *new_stream);
 #endif
 
 #endif /* __AMDGPU_DM_H__ */
