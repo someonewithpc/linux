@@ -879,6 +879,7 @@ STATIC_IFN_KUNIT void fill_stream_properties_from_drm_display_mode(
 	struct dc_stream_state *stream,
 	const struct drm_display_mode *mode_in,
 	const struct drm_connector *connector,
+	const struct dc_sink *sink,
 	const struct drm_connector_state *connector_state,
 	const struct dc_stream_state *old_stream,
 	int requested_bpc,
@@ -949,7 +950,7 @@ STATIC_IFN_KUNIT void fill_stream_properties_from_drm_display_mode(
 		timing_out->hdmi_vic = hv_frame.vic;
 	}
 
-	if (aconnector && amdgpu_dm_is_freesync_video_mode(mode_in, aconnector)) {
+	if (aconnector && amdgpu_dm_is_freesync_video_mode(mode_in, aconnector, sink)) {
 		timing_out->h_addressable = mode_in->hdisplay;
 		timing_out->h_total = mode_in->htotal;
 		timing_out->h_sync_width = mode_in->hsync_end - mode_in->hsync_start;
@@ -1208,7 +1209,7 @@ amdgpu_dm_probed_freesync_vid_base_listed(struct list_head *modes,
  */
 struct drm_display_mode *
 amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
-		bool use_probed_modes)
+		bool use_probed_modes, const struct dc_sink *sink)
 {
 	struct drm_display_mode *m_pref;
 	struct list_head *list_head = use_probed_modes ?
@@ -1241,12 +1242,13 @@ amdgpu_dm_get_highest_refresh_rate_mode(struct amdgpu_dm_connector *aconnector,
 EXPORT_IF_KUNIT(amdgpu_dm_get_highest_refresh_rate_mode);
 
 bool amdgpu_dm_is_freesync_video_mode(const struct drm_display_mode *mode,
-		struct amdgpu_dm_connector *aconnector)
+		struct amdgpu_dm_connector *aconnector,
+		const struct dc_sink *sink)
 {
 	struct drm_display_mode *high_mode;
 	int timing_diff;
 
-	high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false);
+	high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, sink);
 	if (!high_mode || !mode)
 		return false;
 
@@ -1724,9 +1726,10 @@ create_stream_for_sink(struct drm_connector *connector,
 
 	if (aconnector && preferred_mode) {
 		recalculate_timing = amdgpu_freesync_vid_mode &&
-				 amdgpu_dm_is_freesync_video_mode(&mode, aconnector);
+				 amdgpu_dm_is_freesync_video_mode(&mode, aconnector, sink);
 		if (recalculate_timing) {
-			freesync_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false);
+			freesync_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector,
+										false, sink);
 			drm_mode_copy(&saved_mode, &mode);
 			saved_mode.picture_aspect_ratio = mode.picture_aspect_ratio;
 			drm_mode_copy(&mode, freesync_mode);
@@ -1748,11 +1751,11 @@ create_stream_for_sink(struct drm_connector *connector,
 	 */
 	if (!scale || mode_refresh != preferred_refresh)
 		fill_stream_properties_from_drm_display_mode(
-			stream, &mode, connector, con_state, NULL,
+			stream, &mode, connector, sink, con_state, NULL,
 			requested_bpc, requested_encoding, is_hdmi_ep);
 	else
 		fill_stream_properties_from_drm_display_mode(
-			stream, &mode, connector, con_state, old_stream,
+			stream, &mode, connector, sink, con_state, old_stream,
 			requested_bpc, requested_encoding, is_hdmi_ep);
 
 	/* The rest isn't needed for writeback connectors */
@@ -3282,7 +3285,7 @@ STATIC_IFN_KUNIT uint add_fs_modes(struct amdgpu_dm_connector *aconnector)
 	 * with lower resolution than the highest refresh rate supported.
 	 */
 
-	m = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true);
+	m = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true, aconnector->dc_sink);
 	if (!m)
 		return 0;
 
@@ -4152,7 +4155,8 @@ void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
 				 */
 				if (!amdgpu_dm_connector->max_vfreq) {
 					struct drm_display_mode *brr_mode =
-						amdgpu_dm_get_highest_refresh_rate_mode(amdgpu_dm_connector, true);
+						amdgpu_dm_get_highest_refresh_rate_mode(amdgpu_dm_connector,
+											true, sink);
 
 					if (brr_mode)
 						amdgpu_dm_connector->max_vfreq =

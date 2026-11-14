@@ -2407,7 +2407,7 @@ static void dm_test_highest_refresh_writeback_null(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, aconnector);
 
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_WRITEBACK;
-	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false));
+	KUNIT_EXPECT_NULL(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, NULL));
 }
 
 /**
@@ -2424,7 +2424,7 @@ static void dm_test_highest_refresh_cached_base(struct kunit *test)
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
 	aconnector->freesync_vid_base.clock = 148500;
 
-	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, NULL),
 			    &aconnector->freesync_vid_base);
 }
 
@@ -2453,7 +2453,7 @@ static void dm_test_highest_refresh_preferred_mode(struct kunit *test)
 	mode->vtotal = 1125;
 	list_add_tail(&mode->head, &aconnector->base.modes);
 
-	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false),
+	KUNIT_EXPECT_PTR_EQ(test, amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false, NULL),
 			    mode);
 }
 
@@ -2525,7 +2525,7 @@ static void dm_test_highest_refresh_probed_skips_copy(struct kunit *test)
 				     2720, 1481, 241500, DRM_MODE_TYPE_PREFERRED);
 
 	KUNIT_EXPECT_PTR_EQ(test,
-			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true),
+			    amdgpu_dm_get_highest_refresh_rate_mode(aconnector, true, NULL),
 			    mode);
 }
 
@@ -2850,7 +2850,7 @@ static void dm_test_is_freesync_video_mode_null_mode(struct kunit *test)
 	aconnector->base.connector_type = DRM_MODE_CONNECTOR_HDMIA;
 	aconnector->freesync_vid_base.clock = 148500;
 
-	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(NULL, aconnector));
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(NULL, aconnector, NULL));
 }
 
 /**
@@ -2887,7 +2887,7 @@ static void dm_test_is_freesync_video_mode_match(struct kunit *test)
 	candidate.vsync_end = 1089;
 	candidate.vtotal = 1125;
 
-	KUNIT_EXPECT_TRUE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector));
+	KUNIT_EXPECT_TRUE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector, NULL));
 }
 
 /**
@@ -2916,7 +2916,7 @@ static void dm_test_is_freesync_video_mode_no_match(struct kunit *test)
 	candidate.htotal = 1650;
 	candidate.vtotal = 750;
 
-	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector));
+	KUNIT_EXPECT_FALSE(test, amdgpu_dm_is_freesync_video_mode(&candidate, aconnector, NULL));
 }
 
 /* Tests for amdgpu_dm_update_cacp_caps() */
@@ -4183,7 +4183,7 @@ static void dm_test_fill_stream_borders_zeroed(struct kunit *test)
 	timing->v_border_bottom = 8;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->h_border_left, 0);
@@ -4205,7 +4205,7 @@ static void dm_test_fill_stream_rgb_defaults(struct kunit *test)
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding, (int)PIXEL_ENCODING_RGB);
@@ -4232,7 +4232,7 @@ static void dm_test_fill_stream_sync_polarity_positive(struct kunit *test)
 	ctx->mode->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->flags.HSYNC_POSITIVE_POLARITY, 1);
@@ -4252,7 +4252,7 @@ static void dm_test_fill_stream_sync_polarity_negative(struct kunit *test)
 	ctx->mode->flags = 0;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->flags.HSYNC_POSITIVE_POLARITY, 0);
@@ -4282,7 +4282,7 @@ static void dm_test_fill_stream_inherits_old_stream(struct kunit *test)
 	ctx->mode->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, old_stream, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, old_stream, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->vic, 16);
@@ -4313,7 +4313,7 @@ static void dm_test_fill_stream_timing_from_crtc(struct kunit *test)
 	ctx->mode->crtc_clock = 148500;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->h_addressable, 1920);
@@ -4341,7 +4341,7 @@ static void dm_test_fill_stream_color_depth_requested_bpc(struct kunit *test)
 	ctx->aconnector->base.display_info.bpc = 12;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 10,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 10,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->display_color_depth,
@@ -4359,7 +4359,7 @@ static void dm_test_fill_stream_content_type(struct kunit *test)
 	ctx->conn_state->content_type = DRM_MODE_CONTENT_TYPE_GRAPHICS;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)ctx->stream->content_type,
@@ -4378,7 +4378,7 @@ static void dm_test_fill_stream_aspect_ratio(struct kunit *test)
 	ctx->mode->picture_aspect_ratio = HDMI_PICTURE_ASPECT_16_9;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->aspect_ratio,
@@ -4399,7 +4399,7 @@ static void dm_test_fill_stream_encoding_from_caller_ycbcr420(struct kunit *test
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_YCBCR420, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding,
@@ -4418,7 +4418,7 @@ static void dm_test_fill_stream_encoding_from_caller_ycbcr422(struct kunit *test
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_YCBCR422, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding,
@@ -4437,7 +4437,7 @@ static void dm_test_fill_stream_encoding_from_caller_ycbcr444(struct kunit *test
 	struct dc_crtc_timing *timing = &ctx->stream->timing;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_YCBCR444, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->pixel_encoding,
@@ -4462,7 +4462,7 @@ static void dm_test_fill_stream_hdmi_ep_clamps_depth(struct kunit *test)
 	ctx->mode->crtc_clock = 148500;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 10,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 10,
 		PIXEL_ENCODING_RGB, true);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->display_color_depth,
@@ -4486,7 +4486,7 @@ static void dm_test_fill_stream_non_hdmi_ep_keeps_depth(struct kunit *test)
 	ctx->mode->crtc_clock = 148500;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 10,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 10,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->display_color_depth,
@@ -4520,7 +4520,7 @@ static void dm_test_fill_stream_hdmi_infoframe(struct kunit *test)
 	ctx->stream->signal = SIGNAL_TYPE_HDMI_TYPE_A;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, old_stream, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, old_stream, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	/* The HDMI block overwrote the old stream's VIC of 99 with the AVI code. */
@@ -4561,7 +4561,7 @@ static void dm_test_fill_stream_freesync_video(struct kunit *test)
 	ctx->mode->vtotal = 1125;
 
 	fill_stream_properties_from_drm_display_mode(ctx->stream, ctx->mode,
-		&ctx->aconnector->base, ctx->conn_state, NULL, 8,
+		&ctx->aconnector->base, NULL, ctx->conn_state, NULL, 8,
 		PIXEL_ENCODING_RGB, false);
 
 	KUNIT_EXPECT_EQ(test, (int)timing->h_addressable, 1920);

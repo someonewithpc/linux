@@ -5666,10 +5666,11 @@ STATIC_IFN_KUNIT int dm_update_crtc_state(struct amdgpu_display_manager *dm,
 			goto skip_modeset;
 		} else if (amdgpu_freesync_vid_mode && aconnector &&
 			   amdgpu_dm_is_freesync_video_mode(&new_crtc_state->mode,
-						  aconnector)) {
+						  aconnector, aconnector->dc_sink)) {
 			struct drm_display_mode *high_mode;
 
-			high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false);
+			high_mode = amdgpu_dm_get_highest_refresh_rate_mode(aconnector, false,
+									    aconnector->dc_sink);
 			if (!drm_mode_equal(&new_crtc_state->mode, high_mode))
 				amdgpu_dm_set_freesync_fixed_config(dm_new_crtc_state);
 		}
