@@ -6291,6 +6291,20 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 		if (dm_old_con_state->scaling != dm_new_con_state->scaling)
 			new_crtc_state->connectors_changed = true;
+
+		/*
+		 * With VRR active, the CRTC check adds only the primary plane,
+		 * and DC would drop any other plane from the stream
+		 */
+		if (dm_old_con_state->abm_level != dm_new_con_state->abm_level) {
+			ret = drm_atomic_add_affected_planes(state, new_con_state->crtc);
+			if (ret) {
+				drm_dbg_atomic(dev,
+					       "drm_atomic_add_affected_planes() failed: %pe\n",
+					       ERR_PTR(ret));
+				goto fail;
+			}
+		}
 	}
 
 	if (dc_resource_is_dsc_encoding_supported(dc)) {
